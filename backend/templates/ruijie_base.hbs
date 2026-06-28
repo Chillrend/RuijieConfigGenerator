@@ -1,0 +1,63 @@
+!
+hostname {{hostname}}
+!
+{{#if enableWeb}}
+enable service web-server
+enable service web-server http
+enable service web-server https
+!
+{{/if}}
+{{#if enableSsh}}
+enable service ssh-server
+crypto key generate rsa
+line vty 0 4
+ login local
+ transport input ssh
+!
+{{/if}}
+{{#if enablePassword}}
+enable secret {{enablePassword}}
+!
+{{/if}}
+{{#if adminUsername}}
+username {{adminUsername}} password 0 {{adminPassword}}
+{{#if enableWeb}}
+webmaster level 0 username {{adminUsername}} password 0 {{adminPassword}}
+{{/if}}
+!
+{{/if}}
+{{#if enableCwmp}}
+cwmp
+ acs url https://wiscloud-as.ruijienetworks.com/acs
+ cpe inform interval 60
+ timer cpe-timeout 70
+!
+{{/if}}
+{{#each vlans}}
+vlan {{this.id}}
+ name {{this.name}}
+!
+{{/each}}
+{{#if mgmtVlan}}
+interface vlan {{mgmtVlan}}
+ ip address {{mgmtIp}} {{mgmtMask}}
+!
+ip route 0.0.0.0 0.0.0.0 {{mgmtGateway}}
+!
+{{/if}}
+{{#each ports}}
+interface {{this.mappedName}}
+{{#if this.description}}
+ description {{this.description}}
+{{/if}}
+ switchport mode {{this.mode}}
+{{#if (eq this.mode "access")}}
+ switchport access vlan {{this.vlan}}
+{{else}}
+ switchport trunk allowed vlan {{this.allowed_vlans}}
+{{#if this.native_vlan}}
+ switchport trunk native vlan {{this.native_vlan}}
+{{/if}}
+{{/if}}
+!
+{{/each}}

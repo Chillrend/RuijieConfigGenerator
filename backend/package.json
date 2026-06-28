@@ -1,0 +1,16 @@
+{
+  "name": "ruijie-sw-conf-gen-backend",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Visual Switch Provisioner — Express API with LowDB and Handlebars",
+  "main": "server.js",
+  "scripts": {
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.21.0",
+    "handlebars": "^4.7.8",
+    "lowdb": "^7.0.1"
+  }
+}

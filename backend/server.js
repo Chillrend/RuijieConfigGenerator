@@ -1,0 +1,185 @@
+import express from 'express';
+import cors from 'cors';
+import { JSONFilePreset } from 'lowdb/node';
+import Handlebars from 'handlebars';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+// --- ESM __dirname workaround ---
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// ────────────────────────────────────────────────────────────
+// 1. Seed Data
+// ────────────────────────────────────────────────────────────
+const defaultData = {
+  vlans: [],
+  hardware: [
+    {
+      id: 'RG-S6150-48VS8CQ-X',
+      portPrefix: 'TFGigabitEthernet 0/',
+      totalPorts: 48,
+      uplinkPrefix: 'HundredGigabitEthernet 0/',
+      uplinkPorts: [49, 50, 51, 52, 53, 54, 55, 56],
+    },
+    {
+      id: 'RG-S5315-24MG6XS-UP-E',
+      portPrefix: 'GigabitEthernet 0/',
+      totalPorts: 24,
+      uplinkPrefix: 'TenGigabitEthernet 0/',
+      uplinkPorts: [25, 26, 27, 28, 29, 30],
+    },
+    {
+      id: 'RG-S5350-24GT4XS-P-E',
+      portPrefix: 'GigabitEthernet 0/',
+      totalPorts: 24,
+      uplinkPrefix: 'TenGigabitEthernet 0/',
+      uplinkPorts: [25, 26, 27, 28],
+    },
+    {
+      id: 'RG-S5350-24GT4XS-E',
+      portPrefix: 'GigabitEthernet 0/',
+      totalPorts: 24,
+      uplinkPrefix: 'TenGigabitEthernet 0/',
+      uplinkPorts: [25, 26, 27, 28],
+    },
+    {
+      id: 'RG-S5350-12GT4XS-P-E',
+      portPrefix: 'GigabitEthernet 0/',
+      totalPorts: 12,
+      uplinkPrefix: 'TenGigabitEthernet 0/',
+      uplinkPorts: [13, 14, 15, 16],
+    },
+    {
+      id: 'RG-S5000-10GT2MS-P-E',
+      portPrefix: 'GigabitEthernet 0/',
+      totalPorts: 10,
+      uplinkPrefix: 'TenGigabitEthernet 0/',
+      uplinkPorts: [11, 12],
+    },
+    {
+      id: 'RG-IS5200-24GT4XS-UP-DC',
+      portPrefix: 'GigabitEthernet 0/',
+      totalPorts: 24,
+      uplinkPrefix: 'TenGigabitEthernet 0/',
+      uplinkPorts: [25, 26, 27, 28],
+    },
+  ],
+};
+
+// ────────────────────────────────────────────────────────────
+// 2. Initialize LowDB
+// ────────────────────────────────────────────────────────────
+const dbPath = path.join(__dirname, 'data', 'db.json');
+const db = await JSONFilePreset(dbPath, defaultData);
+
+// Ensure seed data is persisted on first run
+await db.write();
+
+// ────────────────────────────────────────────────────────────
+// 3. Handlebars Setup
+// ────────────────────────────────────────────────────────────
+Handlebars.registerHelper('eq', (a, b) => a === b);
+
+const templateSource = fs.readFileSync(
+  path.join(__dirname, 'templates', 'ruijie_base.hbs'),
+  'utf-8'
+);
+const configTemplate = Handlebars.compile(templateSource);
+
+// ────────────────────────────────────────────────────────────
+// 4. Express App
+// ────────────────────────────────────────────────────────────
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+// ── GET /api/setup ──────────────────────────────────────────
+app.get('/api/setup', (_req, res) => {
+  res.json({
+    hardware: db.data.hardware,
+    vlans: db.data.vlans,
+  });
+});
+
+app.post('/api/generate-config', (req, res) => {
+  const {
+    hostname,
+    modelId,
+    vlans,
+    ports,
+    enablePassword,
+    adminUsername,
+    adminPassword,
+    enableWeb,
+    enableSsh,
+    enableCwmp,
+    mgmtVlan,
+    mgmtIp,
+    mgmtMask,
+    mgmtGateway
+  } = req.body;
+
+  // Validate required fields
+  if (!hostname || !modelId || !Array.isArray(ports)) {
+    return res.status(400).json({ error: 'Missing required fields: hostname, modelId, ports' });
+  }
+
+  // Find hardware model in the database
+  const model = db.data.hardware.find((hw) => hw.id === modelId);
+  if (!model) {
+    return res.status(404).json({ error: `Hardware model "${modelId}" not found` });
+  }
+
+  // Build the uplink set for O(1) lookups
+  const uplinkSet = new Set(model.uplinkPorts);
+
+  // Filter out unconfigured ports, then map them
+  const mappedPorts = ports
+    .filter((port) => port.configured)
+    .map((port) => {
+      const portNumber = port.id; // 1-indexed port number
+      const isUplink = uplinkSet.has(portNumber);
+      const prefix = isUplink ? model.uplinkPrefix : model.portPrefix;
+
+      return {
+        mappedName: `${prefix}${portNumber}`,
+        mode: port.mode || 'access',
+        vlan: port.vlan || 1,
+        allowed_vlans: port.allowed_vlans || 'all',
+        native_vlan: port.native_vlan || '',
+        description: port.description || '',
+      };
+    });
+
+  // Render the Handlebars template
+  let configText = configTemplate({
+    hostname,
+    enablePassword: enablePassword || '',
+    adminUsername: adminUsername || '',
+    adminPassword: adminPassword || '',
+    enableWeb: !!enableWeb,
+    enableSsh: !!enableSsh,
+    enableCwmp: !!enableCwmp,
+    mgmtVlan: mgmtVlan || '',
+    mgmtIp: mgmtIp || '',
+    mgmtMask: mgmtMask || '',
+    mgmtGateway: mgmtGateway || '',
+    vlans: vlans || [],
+    ports: mappedPorts,
+  });
+
+  // Clean up any empty lines generated by Handlebars conditionals
+  configText = configText.split('\n').filter(line => line.trim() !== '').join('\n');
+
+  res.json({ configText });
+});
+
+// ────────────────────────────────────────────────────────────
+// 5. Start Server
+// ────────────────────────────────────────────────────────────
+const PORT = process.env.PORT || 3001;
+app.listen(PORT, () => {
+  console.log(`✅ Backend running → http://localhost:${PORT}`);
+});
