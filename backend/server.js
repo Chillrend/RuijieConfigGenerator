@@ -150,6 +150,9 @@ app.post('/api/generate-config', (req, res) => {
         allowed_vlans: port.allowed_vlans || 'all',
         native_vlan: port.native_vlan || '',
         description: port.description || '',
+        poeMode: port.poeMode || 'default',
+        poePriority: port.poePriority || 'default',
+        poeMaxPower: port.poeMaxPower || '',
       };
     });
 

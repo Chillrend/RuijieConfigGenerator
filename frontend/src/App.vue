@@ -22,17 +22,17 @@ import { ScrollArea, ScrollBar } from '@/components/ui/scroll-area'
 
 // ── State ────────────────────────────────────────────────────
 const hostname = ref('')
-const adminUsername = ref('')
+const adminUsername = ref('admin')
 const adminPassword = ref('')
 const enablePassword = ref('')
-const enableSsh = ref(false)
-const enableWeb = ref(false)
-const enableCwmp = ref(false)
+const enableSsh = ref(true)
+const enableWeb = ref(true)
+const enableCwmp = ref(true)
 
-const mgmtVlan = ref('')
-const mgmtIp = ref('')
-const mgmtMask = ref('255.255.255.0')
-const mgmtGateway = ref('')
+const mgmtVlan = ref('90')
+const mgmtIp = ref('10.90.')
+const mgmtMask = ref('255.255.0.0')
+const mgmtGateway = ref('10.90.0.1')
 
 const selectedModelId = ref('RG-S5350-24GT4XS-P-E')
 const hardwareOptions = ref([])
@@ -115,10 +115,34 @@ function buildPorts() {
 
   const newPorts = []
   for (let i = 1; i <= model.totalPorts; i++) {
-    newPorts.push({ id: i, isUplink: false, mode: 'access', vlan: 1, allowed_vlans: 'all', native_vlan: '', description: '', configured: false })
+    newPorts.push({ 
+      id: i, 
+      isUplink: false, 
+      mode: 'access', 
+      vlan: 1, 
+      allowed_vlans: 'all', 
+      native_vlan: '', 
+      description: '', 
+      configured: false,
+      poeMode: 'default',
+      poePriority: 'default',
+      poeMaxPower: ''
+    })
   }
   for (const portNum of model.uplinkPorts) {
-    newPorts.push({ id: portNum, isUplink: true, mode: 'trunk', vlan: 1, allowed_vlans: 'all', native_vlan: '', description: '', configured: false })
+    newPorts.push({ 
+      id: portNum, 
+      isUplink: true, 
+      mode: 'trunk', 
+      vlan: 1, 
+      allowed_vlans: 'all', 
+      native_vlan: '', 
+      description: '', 
+      configured: false,
+      poeMode: 'default',
+      poePriority: 'default',
+      poeMaxPower: ''
+    })
   }
   ports.value = newPorts
   selectedPortIds.value = []
@@ -178,6 +202,9 @@ function markUnconfigured() {
     port.allowed_vlans = 'all'
     port.native_vlan = ''
     port.description = ''
+    port.poeMode = 'default'
+    port.poePriority = 'default'
+    port.poeMaxPower = ''
   }
   selectedPortIds.value = []
 }
@@ -594,6 +621,63 @@ onUnmounted(() => {
                     placeholder="e.g. 99" 
                     type="number" min="1" max="4094"
                   />
+                </div>
+
+                <div class="space-y-1.5 border-t pt-3 mt-3">
+                  <Label class="text-xs font-semibold uppercase tracking-wider text-muted-foreground block mb-1">PoE Settings</Label>
+                  <div class="space-y-2">
+                    <div>
+                      <Label class="text-xs">PoE Mode</Label>
+                      <Select 
+                        :model-value="selectedPortsData[0].poeMode"
+                        @update:model-value="val => applyToSelected('poeMode', val)"
+                      >
+                        <SelectTrigger class="h-8 text-xs">
+                          <SelectValue placeholder="Select PoE Mode" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="default">Default (Auto / Inherited)</SelectItem>
+                          <SelectItem value="enabled">Explicitly Enabled (poe enable)</SelectItem>
+                          <SelectItem value="disabled">Explicitly Disabled (no poe enable)</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+
+                    <!-- Extra fields when poeMode === 'enabled' -->
+                    <div v-if="selectedPortsData[0].poeMode === 'enabled'" class="space-y-2 pl-3 border-l-2 border-primary/20 animate-in slide-in-from-left-2 duration-150">
+                      <div>
+                        <Label class="text-xs">PoE Priority</Label>
+                        <Select 
+                          :model-value="selectedPortsData[0].poePriority"
+                          @update:model-value="val => applyToSelected('poePriority', val)"
+                        >
+                          <SelectTrigger class="h-8 text-xs">
+                            <SelectValue placeholder="Select PoE Priority" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="default">Default</SelectItem>
+                            <SelectItem value="low">Low</SelectItem>
+                            <SelectItem value="high">High</SelectItem>
+                            <SelectItem value="critical">Critical</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+
+                      <div>
+                        <Label class="text-xs">Max Power (Watts)</Label>
+                        <Input 
+                          :model-value="selectedPortsData[0].poeMaxPower"
+                          @update:model-value="val => applyToSelected('poeMaxPower', val)"
+                          placeholder="e.g. 15.4 or 30 or 90"
+                          type="number"
+                          step="0.1"
+                          min="0"
+                          max="90"
+                          class="h-8 text-xs"
+                        />
+                      </div>
+                    </div>
+                  </div>
                 </div>
                 
                 <div class="pt-2">

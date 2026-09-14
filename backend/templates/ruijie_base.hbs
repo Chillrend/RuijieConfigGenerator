@@ -59,5 +59,19 @@ interface {{this.mappedName}}
  switchport trunk native vlan {{this.native_vlan}}
 {{/if}}
 {{/if}}
+{{#if (eq this.poeMode "disabled")}}
+ no poe enable
+{{/if}}
+{{#if (eq this.poeMode "enabled")}}
+ poe enable
+{{#if this.poePriority}}
+{{#unless (eq this.poePriority "default")}}
+ poe priority {{this.poePriority}}
+{{/unless}}
+{{/if}}
+{{#if this.poeMaxPower}}
+ poe max-power {{this.poeMaxPower}}
+{{/if}}
+{{/if}}
 !
 {{/each}}
