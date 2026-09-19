@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Mobile Barcode Scanner</title>
+  <script src="https://unpkg.com/html5-qrcode"></script>
+  <script src="/socket.io/socket.io.js"></script>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 0; padding: 0; background-color: #121212; color: white; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; }
+    h2 { margin: 10px 0; font-size: 1.2rem; }
+    #reader { width: 100%; max-width: 500px; }
+    .controls { display: flex; gap: 10px; margin-top: 15px; }
+    button { padding: 10px 16px; border: none; border-radius: 8px; font-size: 1rem; font-weight: bold; cursor: pointer; background: #06b6d4; color: white; }
+    button.secondary { background: #333; }
+    .status { margin-top: 15px; font-size: 0.9rem; color: #aaa; text-align: center; padding: 0 20px;}
+    .success { color: #10b981; }
+  </style>
+</head>
+<body>
+
+  <h2>Scan Barcode</h2>
+  <div id="reader"></div>
+  
+  <div class="controls">
+    <button onclick="setType('serial')" id="btn-serial">Scan Serial</button>
+    <button onclick="setType('mac')" id="btn-mac" class="secondary">Scan MAC</button>
+  </div>
+
+  <div class="status" id="statusMsg">Select type and point camera at barcode.</div>
+
+  <script>
+    const urlParams = new URLSearchParams(window.location.search);
+    const sessionId = urlParams.get('session');
+    
+    if (!sessionId) {
+      document.getElementById('statusMsg').innerText = "Error: No session ID found. Please scan the QR code from the laptop again.";
+    }
+
+    const socket = io();
+    let currentType = 'serial'; // 'serial' or 'mac'
+    let html5QrcodeScanner = null;
+
+    function setType(type) {
+      currentType = type;
+      document.getElementById('btn-serial').className = type === 'serial' ? '' : 'secondary';
+      document.getElementById('btn-mac').className = type === 'mac' ? '' : 'secondary';
+      document.getElementById('statusMsg').innerText = `Ready to scan ${type.toUpperCase()}`;
+    }
+
+    function onScanSuccess(decodedText, decodedResult) {
+      if (!sessionId) return;
+
+      // Send to server
+      socket.emit('scanned_data', {
+        sessionId: sessionId,
+        type: currentType,
+        value: decodedText
+      });
+
+      document.getElementById('statusMsg').innerHTML = `<span class="success">Successfully scanned ${currentType}: ${decodedText}</span>`;
+      
+      // Auto-switch to mac if we just scanned serial
+      if (currentType === 'serial') {
+        setTimeout(() => setType('mac'), 1500);
+      }
+    }
+
+    function onScanFailure(error) {
+      // ignore
+    }
+
+    window.onload = () => {
+      html5QrcodeScanner = new Html5QrcodeScanner(
+        "reader",
+        { fps: 10, qrbox: {width: 250, height: 100}, supportedScanTypes: [Html5QrcodeScanType.SCAN_TYPE_CAMERA] },
+        /* verbose= */ false
+      );
+      html5QrcodeScanner.render(onScanSuccess, onScanFailure);
+    };
+  </script>
+</body>
+</html>
