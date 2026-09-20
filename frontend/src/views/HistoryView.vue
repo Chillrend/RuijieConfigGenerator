@@ -126,6 +126,10 @@ function formatDate(dateStr) {
   return new Date(dateStr).toLocaleString()
 }
 
+function exportCSV() {
+  window.location.href = '/api/deployments/export/csv'
+}
+
 onMounted(() => {
   fetchSetup().then(fetchDeployments)
 })
@@ -134,9 +138,12 @@ onMounted(() => {
 <template>
   <main class="max-w-[1200px] mx-auto px-5 space-y-6">
     <Card class="print:hidden">
-      <CardHeader>
-        <CardTitle>Deployment History</CardTitle>
-        <CardDescription>View and reprint past switch configurations.</CardDescription>
+      <CardHeader class="flex flex-row items-center justify-between">
+        <div class="space-y-1.5">
+          <CardTitle>Deployment History</CardTitle>
+          <CardDescription>View and reprint past switch configurations.</CardDescription>
+        </div>
+        <Button variant="outline" @click="exportCSV">Export CSV</Button>
       </CardHeader>
       <CardContent>
         <div v-if="loading" class="text-center py-10 text-muted-foreground">Loading...</div>

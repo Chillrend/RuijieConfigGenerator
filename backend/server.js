@@ -139,6 +139,24 @@ app.get('/api/deployments', async (_req, res) => {
   res.json(deployments);
 });
 
+// ── GET /api/deployments/export/csv ─────────────────────────
+app.get('/api/deployments/export/csv', async (_req, res) => {
+  try {
+    const deployments = await db.all('SELECT id, serial_number, mac_address, hostname, model_id, mgmt_ip, inventory_tag, created_at FROM deployments ORDER BY created_at DESC');
+    
+    let csv = 'ID,Date,Hostname,Model,Serial Number,MAC Address,Management IP,Inventory Tag\n';
+    for (const dep of deployments) {
+      csv += `"${dep.id}","${new Date(dep.created_at).toLocaleString()}","${dep.hostname || ''}","${dep.model_id || ''}","${dep.serial_number || ''}","${dep.mac_address || ''}","${dep.mgmt_ip || ''}","${dep.inventory_tag || ''}"\n`;
+    }
+
+    res.header('Content-Type', 'text/csv');
+    res.attachment('deployments.csv');
+    res.send(csv);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to export deployments' });
+  }
+});
+
 // ── GET /api/deployments/:id ────────────────────────────────
 app.get('/api/deployments/:id', async (req, res) => {
   const deployment = await db.get('SELECT * FROM deployments WHERE id = ?', req.params.id);
