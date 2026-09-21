@@ -9,7 +9,6 @@ enable service web-server https
 {{/if}}
 {{#if enableSsh}}
 enable service ssh-server
-crypto key generate rsa
 line vty 0 4
  login local
  transport input ssh
@@ -38,6 +37,9 @@ vlan {{this.id}}
  name {{this.name}}
 !
 {{/each}}
+interface vlan 1
+ no ip address
+!
 {{#if mgmtVlan}}
 interface vlan {{mgmtVlan}}
  ip address {{mgmtIp}} {{mgmtMask}}
