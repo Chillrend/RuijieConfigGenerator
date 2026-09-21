@@ -1,7 +1,5 @@
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
-import { io } from 'socket.io-client'
-import QrcodeVue from 'qrcode.vue'
 import JsBarcode from 'jsbarcode'
 import bwipjs from 'bwip-js'
 
@@ -56,14 +54,6 @@ const configText = ref('')
 const loading = ref(false)
 const copied = ref(false)
 const vlanDropdownOpen = ref(false)
-
-const pairingMode = ref(false)
-const sessionId = ref(Math.random().toString(36).substring(2, 10))
-const pairingUrl = computed(() => {
-  return `${window.location.origin}/scanner.html?session=${sessionId.value}`
-})
-
-let socket = null
 
 // Refs for barcodes in print view
 const barcodeSn = ref(null)
@@ -328,6 +318,31 @@ function printSummary() {
   }, 100)
 }
 
+function focusMacInput() {
+  const el = document.getElementById('mac-input')
+  if (el) el.focus()
+}
+
+watch(macAddress, (newVal) => {
+  if (!newVal) return
+
+  // Strip anything that isn't a hex character
+  let clean = newVal.replace(/[^0-9A-Fa-f]/g, '').toUpperCase()
+  
+  // Truncate to maximum 12 hex characters (standard MAC size)
+  if (clean.length > 12) {
+    clean = clean.substring(0, 12)
+  }
+
+  // Insert colons every two characters
+  const formatted = clean.match(/.{1,2}/g)?.join(':') || ''
+  
+  // Only update if it actually changed to avoid infinite loop
+  if (macAddress.value !== formatted) {
+    macAddress.value = formatted
+  }
+})
+
 function handleClickOutside(e) {
   if (!e.target.closest('.vlan-dropdown-wrapper')) {
     vlanDropdownOpen.value = false
@@ -348,18 +363,10 @@ onMounted(async () => {
   } catch (err) {
     console.error('Failed to fetch setup data:', err)
   }
-
-  // Socket.io for mobile scanner
-  socket = io(window.location.origin)
-  socket.on(`scan_result_${sessionId.value}`, (data) => {
-    if (data.type === 'serial') serialNumber.value = data.value
-    if (data.type === 'mac') macAddress.value = data.value
-  })
 })
 
 onUnmounted(() => {
   document.removeEventListener('click', handleClickOutside)
-  if (socket) socket.disconnect()
 })
 </script>
 
@@ -383,31 +390,15 @@ onUnmounted(() => {
 
           <div class="space-y-2">
             <Label>Serial Number (S/N)</Label>
-            <Input v-model="serialNumber" placeholder="Scan or type S/N" autofocus />
+            <Input id="sn-input" v-model="serialNumber" placeholder="Scan or type S/N" autofocus @keydown.enter="focusMacInput" />
           </div>
           <div class="space-y-2">
             <Label>MAC Address <span class="text-muted-foreground font-normal">(Optional)</span></Label>
-            <Input v-model="macAddress" placeholder="Scan or type MAC" />
+            <Input id="mac-input" v-model="macAddress" placeholder="Scan or type MAC" @keydown.enter="unlockConfiguration" />
           </div>
 
           <div class="pt-4 flex flex-col gap-3">
             <Button @click="unlockConfiguration" class="w-full" size="lg">Unlock Configuration</Button>
-            
-            <div class="relative">
-              <div class="absolute inset-0 flex items-center"><span class="w-full border-t"></span></div>
-              <div class="relative flex justify-center text-xs uppercase"><span class="bg-card px-2 text-muted-foreground">Or</span></div>
-            </div>
-
-            <Button variant="outline" @click="pairingMode = !pairingMode" class="w-full">
-              {{ pairingMode ? 'Hide Mobile Scanner Pairing' : '📱 Pair Mobile Scanner' }}
-            </Button>
-            
-            <div v-if="pairingMode" class="flex flex-col items-center p-4 bg-muted/30 rounded-lg border mt-2 animate-in fade-in zoom-in duration-200">
-              <p class="text-sm text-center mb-3 text-muted-foreground">Scan this QR with your phone's camera to use it as a barcode scanner.</p>
-              <div class="bg-white p-2 rounded-md shadow-sm">
-                <qrcode-vue :value="pairingUrl" :size="200" level="M" />
-              </div>
-            </div>
           </div>
         </CardContent>
       </Card>

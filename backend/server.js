@@ -6,8 +6,6 @@ import { fileURLToPath } from 'url';
 import sqlite3 from 'sqlite3';
 import { open } from 'sqlite';
 import Handlebars from 'handlebars';
-import { Server } from 'socket.io';
-import http from 'http';
 
 // --- ESM __dirname workaround ---
 const __filename = fileURLToPath(import.meta.url);
@@ -98,27 +96,12 @@ const templateSource = fs.readFileSync(
 const configTemplate = Handlebars.compile(templateSource);
 
 // ────────────────────────────────────────────────────────────
-// 3. Express App & Socket.IO
+// 3. Express App
 // ────────────────────────────────────────────────────────────
 const app = express();
 app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
-
-const server = http.createServer(app);
-const io = new Server(server, {
-  cors: {
-    origin: '*',
-  }
-});
-
-io.on('connection', (socket) => {
-  // Mobile app can emit scanned codes to a specific session
-  socket.on('scanned_data', (data) => {
-    // data: { sessionId, type: 'serial' | 'mac', value }
-    io.emit(`scan_result_${data.sessionId}`, data);
-  });
-});
 
 // ── GET /api/setup ──────────────────────────────────────────
 app.get('/api/setup', async (_req, res) => {
@@ -299,6 +282,6 @@ app.post('/api/generate-config', async (req, res) => {
 // 4. Start Server
 // ────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3001;
-server.listen(PORT, () => {
+app.listen(PORT, () => {
   console.log(`✅ Backend running → http://localhost:${PORT}`);
 });
