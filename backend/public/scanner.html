@@ -14,6 +14,7 @@
     button { padding: 10px 16px; border: none; border-radius: 8px; font-size: 1rem; font-weight: bold; cursor: pointer; background: #06b6d4; color: white; }
     button.secondary { background: #333; }
     .status { margin-top: 15px; font-size: 0.9rem; color: #aaa; text-align: center; padding: 0 20px;}
+    .hint { margin-top: 20px; font-size: 0.8rem; color: #666; text-align: center; font-style: italic; }
     .success { color: #10b981; }
   </style>
 </head>
@@ -27,6 +28,7 @@
     <button onclick="setType('mac')" id="btn-mac" class="secondary">Scan MAC</button>
   </div>
 
+  <div class="hint" id="hintMsg">Tap the video feed to force camera focus.</div>
   <div class="status" id="statusMsg">Select type and point camera at barcode.</div>
 
   <script>
@@ -73,10 +75,48 @@
     window.onload = () => {
       html5QrcodeScanner = new Html5QrcodeScanner(
         "reader",
-        { fps: 10, qrbox: {width: 250, height: 100}, supportedScanTypes: [Html5QrcodeScanType.SCAN_TYPE_CAMERA] },
+        { 
+          fps: 10, 
+          qrbox: {width: 250, height: 100}, 
+          supportedScanTypes: [Html5QrcodeScanType.SCAN_TYPE_CAMERA],
+          showTorchButtonIfSupported: true,
+          videoConstraints: {
+            facingMode: "environment",
+            advanced: [{ focusMode: "continuous" }]
+          }
+        },
         /* verbose= */ false
       );
       html5QrcodeScanner.render(onScanSuccess, onScanFailure);
+
+      // Tap-to-focus workaround listener
+      document.getElementById('reader').addEventListener('click', async () => {
+        try {
+          if (html5QrcodeScanner && html5QrcodeScanner.html5Qrcode) {
+            const videoElement = document.querySelector('#reader video');
+            if (videoElement && videoElement.srcObject) {
+              const track = videoElement.srcObject.getVideoTracks()[0];
+              if (track) {
+                // Force refocus logic if capabilities permit
+                const capabilities = track.getCapabilities();
+                if (capabilities.focusMode && capabilities.focusMode.includes('continuous')) {
+                  await track.applyConstraints({
+                    advanced: [{ focusMode: "continuous" }]
+                  });
+                } else if (capabilities.focusMode && capabilities.focusMode.includes('manual')) {
+                  // Fallback to manual then back to continuous to force a hardware tick
+                  await track.applyConstraints({ advanced: [{ focusMode: "manual" }] });
+                  setTimeout(async () => {
+                    await track.applyConstraints({ advanced: [{ focusMode: "continuous" }] });
+                  }, 50);
+                }
+              }
+            }
+          }
+        } catch (e) {
+          console.warn("Focus adjustment failed:", e);
+        }
+      });
     };
   </script>
 </body>

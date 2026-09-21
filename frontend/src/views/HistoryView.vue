@@ -165,7 +165,7 @@ onMounted(() => {
               <TableCell class="font-medium">{{ dep.hostname }}</TableCell>
               <TableCell>{{ dep.model_id }}</TableCell>
               <TableCell class="font-mono text-xs">{{ dep.serial_number }}</TableCell>
-              <TableCell class="font-mono text-xs">{{ dep.mac_address }}</TableCell>
+              <TableCell class="font-mono text-xs text-muted-foreground">{{ dep.mac_address || 'N/A' }}</TableCell>
               <TableCell>{{ dep.mgmt_ip || '-' }}</TableCell>
               <TableCell class="text-right">
                 <div class="flex justify-end gap-2">
@@ -211,7 +211,7 @@ onMounted(() => {
                   <div><span class="font-semibold text-muted-foreground w-32 inline-block">Hostname:</span> {{ selectedDeployment.hostname }}</div>
                   <div><span class="font-semibold text-muted-foreground w-32 inline-block">Hardware Model:</span> {{ selectedDeployment.model_id }}</div>
                   <div><span class="font-semibold text-muted-foreground w-32 inline-block">Serial Number:</span> {{ selectedDeployment.serial_number }}</div>
-                  <div><span class="font-semibold text-muted-foreground w-32 inline-block">MAC Address:</span> {{ selectedDeployment.mac_address }}</div>
+                  <div><span class="font-semibold text-muted-foreground w-32 inline-block">MAC Address:</span> {{ selectedDeployment.mac_address || 'N/A' }}</div>
                   <div v-if="selectedDeployment.inventory_tag"><span class="font-semibold text-muted-foreground w-32 inline-block">Inventory Tag:</span> <Badge variant="secondary">{{ selectedDeployment.inventory_tag }}</Badge></div>
                 </div>
                 
@@ -273,7 +273,7 @@ onMounted(() => {
             <div><span class="font-semibold text-slate-500 w-32 inline-block">Hostname:</span> {{ selectedDeployment.hostname }}</div>
             <div><span class="font-semibold text-slate-500 w-32 inline-block">Hardware Model:</span> {{ selectedDeployment.model_id }}</div>
             <div><span class="font-semibold text-slate-500 w-32 inline-block">Serial Number:</span> {{ selectedDeployment.serial_number }}</div>
-            <div><span class="font-semibold text-slate-500 w-32 inline-block">MAC Address:</span> {{ selectedDeployment.mac_address }}</div>
+            <div><span class="font-semibold text-slate-500 w-32 inline-block">MAC Address:</span> {{ selectedDeployment.mac_address || 'N/A' }}</div>
           </div>
           
           <div class="space-y-2">
@@ -300,9 +300,12 @@ onMounted(() => {
             <div class="text-[10px] text-slate-500 mb-1 font-semibold uppercase">Serial Number</div>
             <svg ref="barcodeSn" class="w-full h-[50px] mx-auto"></svg>
           </div>
-          <div class="border p-2 rounded-md bg-slate-50 text-center inline-block min-w-[280px]">
+          <div v-if="selectedDeployment.mac_address" class="border p-2 rounded-md bg-slate-50 text-center inline-block min-w-[280px]">
             <div class="text-[10px] text-slate-500 mb-1 font-semibold uppercase">MAC Address</div>
             <svg ref="barcodeMac" class="w-full h-[50px] mx-auto"></svg>
+          </div>
+          <div v-else class="border p-2 rounded-md bg-slate-50 flex items-center justify-center min-w-[280px]">
+            <div class="text-slate-400 italic">No MAC Address Provided</div>
           </div>
         </div>
       </div>

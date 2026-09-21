@@ -202,14 +202,20 @@ app.post('/api/generate-config', async (req, res) => {
     mgmtGateway
   } = req.body;
 
-  if (!serialNumber || !macAddress) {
-    return res.status(400).json({ error: 'Missing required fields: serialNumber, macAddress' });
+  if (!serialNumber) {
+    return res.status(400).json({ error: 'Missing required field: serialNumber' });
   }
 
   // Conflict checking
-  const existingSNMac = await db.get('SELECT id FROM deployments WHERE serial_number = ? OR mac_address = ?', [serialNumber, macAddress]);
-  if (existingSNMac) {
-    return res.status(409).json({ error: 'A deployment with this Serial Number or MAC Address already exists.' });
+  const existingSN = await db.get('SELECT id FROM deployments WHERE serial_number = ?', [serialNumber]);
+  if (existingSN) {
+    return res.status(409).json({ error: 'A deployment with this Serial Number already exists.' });
+  }
+  if (macAddress) {
+    const existingMac = await db.get('SELECT id FROM deployments WHERE mac_address = ?', [macAddress]);
+    if (existingMac) {
+      return res.status(409).json({ error: 'A deployment with this MAC Address already exists.' });
+    }
   }
 
   if (mgmtIp) {
@@ -280,7 +286,7 @@ app.post('/api/generate-config', async (req, res) => {
     await db.run(`
       INSERT INTO deployments (serial_number, mac_address, hostname, model_id, mgmt_ip, config_payload, generated_cli, inventory_tag)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `, [serialNumber, macAddress, hostname, modelId, mgmtIp || null, JSON.stringify(req.body), configText, inventoryTag]);
+    `, [serialNumber, macAddress || null, hostname, modelId, mgmtIp || null, JSON.stringify(req.body), configText, inventoryTag]);
   } catch (err) {
     console.error('Error saving deployment:', err);
     return res.status(500).json({ error: 'Failed to save deployment to database' });

@@ -60,7 +60,7 @@ const vlanDropdownOpen = ref(false)
 const pairingMode = ref(false)
 const sessionId = ref(Math.random().toString(36).substring(2, 10))
 const pairingUrl = computed(() => {
-  return `${window.location.protocol}//${window.location.hostname}:3001/scanner.html?session=${sessionId.value}`
+  return `${window.location.origin}/scanner.html?session=${sessionId.value}`
 })
 
 let socket = null
@@ -132,8 +132,8 @@ const portLayout = computed(() => {
 // ── Methods ──────────────────────────────────────────────────
 function unlockConfiguration() {
   initError.value = ''
-  if (!serialNumber.value.trim() || !macAddress.value.trim()) {
-    initError.value = 'Both Serial Number and MAC Address are required to proceed.'
+  if (!serialNumber.value.trim()) {
+    initError.value = 'Serial Number is required to proceed.'
     return
   }
   isInitialized.value = true
@@ -350,7 +350,7 @@ onMounted(async () => {
   }
 
   // Socket.io for mobile scanner
-  socket = io(`http://${window.location.hostname}:3001`)
+  socket = io(window.location.origin)
   socket.on(`scan_result_${sessionId.value}`, (data) => {
     if (data.type === 'serial') serialNumber.value = data.value
     if (data.type === 'mac') macAddress.value = data.value
@@ -386,7 +386,7 @@ onUnmounted(() => {
             <Input v-model="serialNumber" placeholder="Scan or type S/N" autofocus />
           </div>
           <div class="space-y-2">
-            <Label>MAC Address</Label>
+            <Label>MAC Address <span class="text-muted-foreground font-normal">(Optional)</span></Label>
             <Input v-model="macAddress" placeholder="Scan or type MAC" />
           </div>
 
@@ -420,7 +420,7 @@ onUnmounted(() => {
       <div class="flex items-center justify-between bg-primary/10 border border-primary/20 p-3 rounded-lg print:hidden">
         <div class="flex gap-6 text-sm">
           <div><span class="text-muted-foreground font-semibold">S/N:</span> <span class="font-mono">{{ serialNumber }}</span></div>
-          <div><span class="text-muted-foreground font-semibold">MAC:</span> <span class="font-mono">{{ macAddress }}</span></div>
+          <div><span class="text-muted-foreground font-semibold">MAC:</span> <span class="font-mono">{{ macAddress || 'N/A' }}</span></div>
         </div>
         <Button variant="ghost" size="sm" class="h-7 text-xs" @click="isInitialized = false">Change</Button>
       </div>
@@ -698,7 +698,7 @@ onUnmounted(() => {
               <div><span class="font-semibold text-slate-500 w-32 inline-block">Hostname:</span> {{ hostname || 'Not set' }}</div>
               <div><span class="font-semibold text-slate-500 w-32 inline-block">Hardware Model:</span> {{ selectedModelId }}</div>
               <div><span class="font-semibold text-slate-500 w-32 inline-block">Serial Number:</span> {{ serialNumber }}</div>
-              <div><span class="font-semibold text-slate-500 w-32 inline-block">MAC Address:</span> {{ macAddress }}</div>
+              <div><span class="font-semibold text-slate-500 w-32 inline-block">MAC Address:</span> {{ macAddress || 'N/A' }}</div>
             </div>
             
             <div class="space-y-2">
@@ -725,9 +725,12 @@ onUnmounted(() => {
               <div class="text-[10px] text-slate-500 mb-1 font-semibold uppercase">Serial Number</div>
               <svg ref="barcodeSn" class="w-full h-[50px] mx-auto"></svg>
             </div>
-            <div class="border p-2 rounded-md bg-slate-50 text-center inline-block min-w-[280px]">
+            <div v-if="macAddress" class="border p-2 rounded-md bg-slate-50 text-center inline-block min-w-[280px]">
               <div class="text-[10px] text-slate-500 mb-1 font-semibold uppercase">MAC Address</div>
               <svg ref="barcodeMac" class="w-full h-[50px] mx-auto"></svg>
+            </div>
+            <div v-else class="border p-2 rounded-md bg-slate-50 flex items-center justify-center min-w-[280px]">
+              <div class="text-slate-400 italic">No MAC Address Provided</div>
             </div>
           </div>
         </div>
