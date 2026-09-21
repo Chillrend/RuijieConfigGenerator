@@ -77,7 +77,23 @@
         "reader",
         { 
           fps: 10, 
-          qrbox: {width: 250, height: 100}, 
+          qrbox: function(viewfinderWidth, viewFinderHeight) {
+            // Make the scanning box dynamic, but favor width for 1D barcodes
+            let width = viewfinderWidth * 0.8;
+            let height = viewfinderWidth * 0.4;
+            if (width > 350) width = 350;
+            if (height > 150) height = 150;
+            return { width: width, height: height };
+          },
+          formatsToSupport: [
+            Html5QrcodeSupportedFormats.CODE_128,
+            Html5QrcodeSupportedFormats.CODE_39,
+            Html5QrcodeSupportedFormats.CODE_93,
+            Html5QrcodeSupportedFormats.QR_CODE,
+            Html5QrcodeSupportedFormats.DATA_MATRIX,
+            Html5QrcodeSupportedFormats.EAN_13,
+            Html5QrcodeSupportedFormats.UPC_A
+          ],
           supportedScanTypes: [Html5QrcodeScanType.SCAN_TYPE_CAMERA],
           showTorchButtonIfSupported: true,
           videoConstraints: {
