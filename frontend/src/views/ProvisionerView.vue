@@ -16,6 +16,7 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/com
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Checkbox } from '@/components/ui/checkbox'
+import LabelPrinterModal from '@/components/LabelPrinterModal.vue'
 import {
   Table,
   TableBody,
@@ -63,6 +64,7 @@ const configText = ref('')
 const loading = ref(false)
 const copied = ref(false)
 const vlanDropdownOpen = ref(false)
+const showPrintLabelModal = ref(false)
 
 // Refs for barcodes in print view
 const barcodeSn = ref(null)
@@ -870,6 +872,7 @@ onUnmounted(() => {
                 <Button v-if="configText" variant="outline" @click="copyConfig">
                   {{ copied ? '✓ Copied' : '📋 Copy CLI' }}
                 </Button>
+                <Button variant="outline" @click="showPrintLabelModal = true">🏷️ Print Label</Button>
                 <Button variant="outline" @click="printSummary">🖨️ Print Summary</Button>
                 <Button :disabled="loading || !hostname.trim()" @click="generateConfig">
                   {{ loading ? 'Saving & Generating…' : (editingDeploymentId ? '💾 Update Configuration' : 'Generate & Save') }}
@@ -1014,6 +1017,14 @@ onUnmounted(() => {
         </div>
       </div>
     </div>
+    <LabelPrinterModal
+      v-model:open="showPrintLabelModal"
+      :hostname="hostname"
+      :inventoryTag="inventoryTag"
+      :managementIp="mgmtIp"
+      :serialNumber="serialNumber"
+      :macAddress="macAddress"
+    />
   </main>
 </template>
 

@@ -15,7 +15,7 @@ npm run dev --prefix backend &
 BACKEND_PID=$!
 
 echo "Starting frontend..."
-npm run dev --prefix frontend &
+npm run dev --prefix frontend -- --host 0.0.0.0 &
 FRONTEND_PID=$!
 
 echo "Both services are running. Press Ctrl+C to stop."

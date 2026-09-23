@@ -18,6 +18,7 @@ import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import LabelPrinterModal from '@/components/LabelPrinterModal.vue'
 
 const router = useRouter()
 
@@ -27,6 +28,7 @@ const loading = ref(true)
 
 const selectedDeployment = ref(null)
 const showModal = ref(false)
+const showPrintLabelModal = ref(false)
 
 const showEditModal = ref(false)
 const editForm = ref({
@@ -309,6 +311,7 @@ onMounted(() => {
           <div class="flex gap-2">
             <Button variant="secondary" @click="reconfigureDeployment(selectedDeployment.id)">🛠️ Reconfigure</Button>
             <Button variant="outline" @click="openEditModal(selectedDeployment)">✏️ Edit Info</Button>
+            <Button variant="outline" @click="showPrintLabelModal = true">🏷️ Print Label</Button>
             <Button variant="outline" @click="printDocument">🖨️ Print</Button>
             <Button variant="ghost" @click="close">Close</Button>
           </div>
@@ -554,5 +557,14 @@ onMounted(() => {
         </CardContent>
       </Card>
     </div>
+    
+    <LabelPrinterModal
+      v-model:open="showPrintLabelModal"
+      :hostname="selectedDeployment?.hostname"
+      :inventoryTag="selectedDeployment?.inventoryTag || selectedDeployment?.inventory_tag"
+      :managementIp="selectedDeployment?.mgmtIp || selectedDeployment?.mgmt_ip"
+      :serialNumber="selectedDeployment?.serialNumber || selectedDeployment?.serial_number"
+      :macAddress="selectedDeployment?.macAddress || selectedDeployment?.mac_address"
+    />
   </main>
 </template>
