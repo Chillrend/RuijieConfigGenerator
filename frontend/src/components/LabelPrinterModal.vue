@@ -142,41 +142,63 @@ const drawLabel = async () => {
   ctx.fillRect(0, 0, canvas.width, canvas.height)
   
   ctx.fillStyle = 'black'
-  
-  // Left side: Text
-  ctx.font = 'bold 32px Arial'
-  ctx.fillText(props.hostname || 'Unknown Host', 10, 36)
-  
-  ctx.font = '22px Arial'
-  ctx.fillText(props.inventoryTag || 'No Tag', 10, 68)
-  
-  ctx.font = '20px Arial'
-  ctx.fillText(`IP: ${props.managementIp || 'DHCP/None'}`, 10, 94)
-  
-  ctx.font = '20px Arial'
-  ctx.fillText(`S/N: ${props.serialNumber || 'N/A'}`, 10, 118)
 
-  // Right side: DataMatrix barcode
+  // 1. Generate barcode first to know how much space we have available
+  let barcodeCanvas = null
+  let barcodeWidth = 0
   if (props.inventoryTag) {
-    // Generate barcode to a temporary hidden canvas first
-    const tempCanvas = document.createElement('canvas')
+    barcodeCanvas = document.createElement('canvas')
     try {
-      bwipjs.toCanvas(tempCanvas, {
+      bwipjs.toCanvas(barcodeCanvas, {
         bcid: 'datamatrix',
         text: props.inventoryTag,
         scale: 4, 
         height: 10,
         includetext: false,
       })
-      // Draw the temporary canvas onto the main canvas, aligned right
-      const xPos = canvas.width - tempCanvas.width - 15
-      const yPos = (canvas.height - tempCanvas.height) / 2
-      ctx.drawImage(tempCanvas, xPos, yPos)
+      barcodeWidth = barcodeCanvas.width
     } catch (e) {
       console.error("Barcode generation failed", e)
-      ctx.font = 'italic 16px Arial'
-      ctx.fillText("Barcode err", 300, 64)
+      barcodeWidth = 80 // Rough fallback
     }
+  }
+
+  // Calculate available width for text
+  // Left padding (10) + Gap to barcode (15) + Right padding (15) = 40px
+  const maxTextWidth = canvas.width - barcodeWidth - 40
+  
+  // Left side: Text
+  const hostname = props.hostname || 'Unknown Host'
+  let hostnameFontSize = 32
+  ctx.font = `bold ${hostnameFontSize}px Arial`
+  
+  // Auto-scale hostname down if it's too long
+  while (ctx.measureText(hostname).width > maxTextWidth && hostnameFontSize > 14) {
+    hostnameFontSize -= 2
+    ctx.font = `bold ${hostnameFontSize}px Arial`
+  }
+  ctx.fillText(hostname, 10, 36)
+  
+  const inventory = props.inventoryTag || 'No Tag'
+  ctx.font = '22px Arial'
+  ctx.fillText(inventory, 10, 68, maxTextWidth)
+  
+  const ip = `IP: ${props.managementIp || 'DHCP/None'}`
+  ctx.font = '20px Arial'
+  ctx.fillText(ip, 10, 94, maxTextWidth)
+  
+  const sn = `S/N: ${props.serialNumber || 'N/A'}`
+  ctx.font = '20px Arial'
+  ctx.fillText(sn, 10, 118, maxTextWidth)
+
+  // Right side: DataMatrix barcode
+  if (barcodeCanvas && barcodeWidth > 0) {
+    const xPos = canvas.width - barcodeCanvas.width - 15
+    const yPos = (canvas.height - barcodeCanvas.height) / 2
+    ctx.drawImage(barcodeCanvas, xPos, yPos)
+  } else if (props.inventoryTag) {
+    ctx.font = 'italic 16px Arial'
+    ctx.fillText("Barcode err", canvas.width - 90, 64)
   }
 }
 
