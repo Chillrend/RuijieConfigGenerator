@@ -1,7 +1,11 @@
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import JsBarcode from 'jsbarcode'
 import bwipjs from 'bwip-js'
+
+const route = useRoute()
+const router = useRouter()
 
 // Import Shadcn UI Components
 import { Button } from '@/components/ui/button'
@@ -24,6 +28,8 @@ import { ScrollArea, ScrollBar } from '@/components/ui/scroll-area'
 
 // ── State ────────────────────────────────────────────────────
 const isInitialized = ref(false)
+const editingDeploymentId = ref(null)
+const isLoadingDeployment = ref(false)
 const serialNumber = ref('')
 const macAddress = ref('')
 const initError = ref('')
@@ -32,10 +38,13 @@ const inventoryTag = ref('')
 const hostname = ref('')
 const adminUsername = ref('admin')
 const adminPassword = ref('')
-const enablePassword = ref('')
+const confirmPassword = ref('')
 const enableSsh = ref(true)
 const enableWeb = ref(true)
 const enableCwmp = ref(true)
+
+const selectedTimezone = ref('WIB 7 0')
+const ntpServers = ref('0.id.pool.ntp.org, 1.id.pool.ntp.org')
 
 const mgmtVlan = ref('90')
 const mgmtIp = ref('10.90.')
@@ -81,6 +90,10 @@ const availableVlans = computed(() =>
 const configuredPorts = computed(() => {
   return ports.value.filter((p) => p.configured)
 })
+
+const stdPorts = computed(() => ports.value.filter((p) => !p.isUplink))
+const uplinkPortsList = computed(() => ports.value.filter((p) => p.isUplink))
+const halfStdPortsCount = computed(() => Math.ceil(stdPorts.value.length / 2))
 
 const portLayout = computed(() => {
   const model = selectedModel.value
@@ -192,6 +205,63 @@ function selectAllUnconfigured() {
   selectedPortIds.value = ports.value.filter(p => !p.configured).map(p => p.id)
 }
 
+function selectFirstHalf() {
+  const std = stdPorts.value
+  const half = Math.ceil(std.length / 2)
+  selectedPortIds.value = std.slice(0, half).map(p => p.id)
+}
+
+function selectSecondHalf() {
+  const std = stdPorts.value
+  const half = Math.ceil(std.length / 2)
+  selectedPortIds.value = std.slice(half).map(p => p.id)
+}
+
+function selectAllUplinks() {
+  selectedPortIds.value = uplinkPortsList.value.map(p => p.id)
+}
+
+function ensureVlanInSelected(vlanId, defaultName) {
+  if (!selectedVlans.value.some(v => Number(v.id) === Number(vlanId))) {
+    const fromDb = vlanDatabase.value.find(v => Number(v.id) === Number(vlanId))
+    if (fromDb) {
+      selectedVlans.value.push({ ...fromDb })
+    } else {
+      selectedVlans.value.push({ id: Number(vlanId), name: defaultName })
+    }
+  }
+}
+
+function applyPresetCctv() {
+  ensureVlanInSelected(32, '0032-CCTVSPC')
+  for (const port of selectedPortsData.value) {
+    port.configured = true
+    port.mode = 'access'
+    port.vlan = '32'
+    port.description = 'CCTV'
+  }
+}
+
+function applyPresetUplinkDownlink() {
+  ensureVlanInSelected(90, '0090-AntarSwitchBaru')
+  for (const port of selectedPortsData.value) {
+    port.configured = true
+    port.mode = 'trunk'
+    port.allowed_vlans = 'all'
+    port.native_vlan = '90'
+    port.description = 'UPLINK/DOWNLINK'
+  }
+}
+
+function handleVlanInput(field, val) {
+  let clean = String(val).replace(/\D/g, '')
+  if (clean !== '') {
+    const num = parseInt(clean, 10)
+    if (num > 4094) clean = '4094'
+  }
+  applyToSelected(field, clean)
+}
+
 function getPortName(port) {
   const model = selectedModel.value
   if (!model) return `Port ${port.id}`
@@ -240,9 +310,18 @@ async function generateConfig() {
     configText.value = '! ERROR: Hostname is required.'
     return
   }
+  if (adminPassword.value !== confirmPassword.value) {
+    configText.value = '! ERROR: Passwords do not match. Please ensure Password and Confirm Password match.'
+    return
+  }
   if (mgmtVlan.value || mgmtIp.value || mgmtMask.value || mgmtGateway.value) {
     if (!mgmtVlan.value || !mgmtIp.value || !mgmtMask.value || !mgmtGateway.value) {
       configText.value = '! ERROR: Management VLAN, IP, Mask, and Gateway must all be provided together.'
+      return
+    }
+    const mv = parseInt(mgmtVlan.value, 10)
+    if (isNaN(mv) || mv < 1 || mv > 4094) {
+      configText.value = `! ERROR: Management VLAN must be between 1 and 4094.`
       return
     }
   }
@@ -253,6 +332,20 @@ async function generateConfig() {
       configText.value = `! ERROR: Port ${port.id} is configured but missing a description. A description is mandatory for all enabled ports.`
       return
     }
+    if (port.mode === 'access') {
+      const v = parseInt(port.vlan, 10)
+      if (isNaN(v) || v < 1 || v > 4094) {
+        configText.value = `! ERROR: Port ${port.id} has invalid Access VLAN: "${port.vlan}". Must be between 1 and 4094.`
+        return
+      }
+    }
+    if (port.mode === 'trunk' && port.native_vlan) {
+      const nv = parseInt(port.native_vlan, 10)
+      if (isNaN(nv) || nv < 1 || nv > 4094) {
+        configText.value = `! ERROR: Port ${port.id} has invalid Native VLAN: "${port.native_vlan}". Must be between 1 and 4094.`
+        return
+      }
+    }
   }
 
   loading.value = true
@@ -262,10 +355,11 @@ async function generateConfig() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
+        editingDeploymentId: editingDeploymentId.value,
         serialNumber: serialNumber.value.trim(),
         macAddress: macAddress.value.trim(),
         hostname: hostname.value.trim(),
-        enablePassword: enablePassword.value.trim(),
+        enablePassword: adminPassword.value.trim(),
         adminUsername: adminUsername.value.trim(),
         adminPassword: adminPassword.value.trim(),
         enableWeb: enableWeb.value,
@@ -276,6 +370,8 @@ async function generateConfig() {
         mgmtMask: mgmtMask.value,
         mgmtGateway: mgmtGateway.value,
         modelId: selectedModelId.value,
+        timezone: selectedTimezone.value,
+        ntpServers: ntpServers.value,
         vlans: selectedVlans.value,
         ports: ports.value,
       }),
@@ -285,7 +381,7 @@ async function generateConfig() {
     if (!data.error) {
        inventoryTag.value = data.inventoryTag
        generatePrintBarcodes()
-       alert("Configuration generated and saved to history successfully!");
+       alert(editingDeploymentId.value ? "Deployment configuration updated successfully!" : "Configuration generated and saved to history successfully!");
     }
   } catch (err) {
     configText.value = `! ERROR: ${err.message}`
@@ -349,7 +445,81 @@ function handleClickOutside(e) {
   }
 }
 
-watch(selectedModelId, () => buildPorts())
+async function loadDeploymentForEdit(id) {
+  isLoadingDeployment.value = true
+  try {
+    const res = await fetch(`/api/deployments/${id}`)
+    if (!res.ok) {
+      alert('Deployment not found.')
+      return
+    }
+    const dep = await res.json()
+    editingDeploymentId.value = dep.id
+    serialNumber.value = dep.serial_number || ''
+    macAddress.value = dep.mac_address || ''
+    inventoryTag.value = dep.inventory_tag || ''
+    selectedModelId.value = dep.model_id
+
+    const payload = JSON.parse(dep.config_payload || '{}')
+    hostname.value = payload.hostname || dep.hostname || ''
+    adminUsername.value = payload.adminUsername || 'admin'
+    adminPassword.value = payload.adminPassword || payload.enablePassword || ''
+    confirmPassword.value = payload.adminPassword || payload.enablePassword || ''
+    enableSsh.value = payload.enableSsh ?? true
+    enableWeb.value = payload.enableWeb ?? true
+    enableCwmp.value = payload.enableCwmp ?? true
+    mgmtVlan.value = payload.mgmtVlan || '90'
+    mgmtIp.value = payload.mgmtIp || dep.mgmt_ip || '10.90.'
+    mgmtMask.value = payload.mgmtMask || '255.255.0.0'
+    mgmtGateway.value = payload.mgmtGateway || '10.90.0.1'
+
+    selectedTimezone.value = payload.timezone || 'WIB 7 0'
+    if (payload.ntpServers) {
+      ntpServers.value = Array.isArray(payload.ntpServers) ? payload.ntpServers.join(', ') : payload.ntpServers
+    } else {
+      ntpServers.value = '0.id.pool.ntp.org, 1.id.pool.ntp.org'
+    }
+
+    if (payload.vlans && Array.isArray(payload.vlans)) {
+      selectedVlans.value = payload.vlans
+    }
+    if (payload.ports && Array.isArray(payload.ports)) {
+      ports.value = payload.ports
+    }
+    configText.value = dep.generated_cli || ''
+    isInitialized.value = true
+  } catch (err) {
+    console.error('Failed to load deployment for editing', err)
+  } finally {
+    isLoadingDeployment.value = false
+  }
+}
+
+function exitEditMode() {
+  editingDeploymentId.value = null
+  router.replace({ path: '/' })
+  isInitialized.value = false
+  serialNumber.value = ''
+  macAddress.value = ''
+  inventoryTag.value = ''
+  hostname.value = ''
+  adminPassword.value = ''
+  confirmPassword.value = ''
+  selectedTimezone.value = 'WIB 7 0'
+  ntpServers.value = '0.id.pool.ntp.org, 1.id.pool.ntp.org'
+  configText.value = ''
+  buildPorts()
+}
+
+watch(selectedModelId, () => {
+  if (!isLoadingDeployment.value) buildPorts()
+})
+
+watch(() => route.query.edit, (newId) => {
+  if (newId) {
+    loadDeploymentForEdit(newId)
+  }
+})
 
 onMounted(async () => {
   document.addEventListener('click', handleClickOutside)
@@ -360,6 +530,9 @@ onMounted(async () => {
     vlanDatabase.value = data.vlans || []
     selectedVlans.value = [...(data.vlans || [])]
     buildPorts()
+    if (route.query.edit) {
+      await loadDeploymentForEdit(route.query.edit)
+    }
   } catch (err) {
     console.error('Failed to fetch setup data:', err)
   }
@@ -407,6 +580,17 @@ onUnmounted(() => {
     <!-- ═══ Main App (Visible after initialization) ═══ -->
     <div v-if="isInitialized" class="space-y-6">
       
+      <!-- Reconfiguring Alert Bar -->
+      <div v-if="editingDeploymentId" class="flex flex-col sm:flex-row items-start sm:items-center justify-between bg-amber-500/10 border border-amber-500/30 p-3 rounded-lg gap-2 print:hidden">
+        <div class="flex items-center gap-2 text-sm text-amber-500 font-medium">
+          <span class="text-base">🛠️</span>
+          <span>Reconfiguring Deployment #{{ editingDeploymentId }} — <strong>{{ hostname || 'Switch' }}</strong> (S/N: {{ serialNumber }})</span>
+        </div>
+        <div class="flex items-center gap-2">
+          <Button variant="outline" size="sm" class="h-7 text-xs border-amber-500/40 text-amber-500 hover:bg-amber-500/10" @click="exitEditMode">Exit Reconfigure Mode</Button>
+        </div>
+      </div>
+
       <!-- Current Identity Bar -->
       <div class="flex items-center justify-between bg-primary/10 border border-primary/20 p-3 rounded-lg print:hidden">
         <div class="flex gap-6 text-sm">
@@ -447,10 +631,10 @@ onUnmounted(() => {
               <Input v-model="adminUsername" placeholder="e.g. admin" />
             </div>
             <div class="space-y-1.5">
-              <Label>Admin & Enable Password</Label>
+              <Label>Password (Plain Text)</Label>
               <div class="flex gap-2">
-                <Input v-model="adminPassword" type="password" placeholder="Admin Pass" />
-                <Input v-model="enablePassword" type="password" placeholder="Enable Pass" />
+                <Input v-model="adminPassword" type="text" placeholder="Password" />
+                <Input v-model="confirmPassword" type="text" placeholder="Confirm Password" />
               </div>
             </div>
           </div>
@@ -467,6 +651,30 @@ onUnmounted(() => {
             <div class="flex items-center space-x-2">
               <Checkbox id="enableCwmp" v-model="enableCwmp" />
               <Label for="enableCwmp" class="font-normal cursor-pointer">CWMP Enabled?</Label>
+            </div>
+          </div>
+
+          <div class="border-t pt-4">
+            <Label class="text-sm font-semibold mb-2 block">Time & Network Time Protocol (NTP)</Label>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div class="space-y-1.5">
+                <Label>Timezone</Label>
+                <Select v-model="selectedTimezone">
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select Timezone" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="WIB 7 0">WIB - Western Indonesia (UTC+7)</SelectItem>
+                    <SelectItem value="WITA 8 0">WITA - Central Indonesia (UTC+8)</SelectItem>
+                    <SelectItem value="WIT 9 0">WIT - Eastern Indonesia (UTC+9)</SelectItem>
+                    <SelectItem value="UTC 0 0">UTC (UTC+0)</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div class="space-y-1.5">
+                <Label>NTP Server(s) <span class="text-muted-foreground text-xs font-normal">(comma-separated)</span></Label>
+                <Input v-model="ntpServers" placeholder="e.g. 0.id.pool.ntp.org, 1.id.pool.ntp.org" />
+              </div>
             </div>
           </div>
 
@@ -572,8 +780,11 @@ onUnmounted(() => {
               </div>
               <ScrollBar orientation="horizontal" />
             </ScrollArea>
-            <div class="mt-4 flex gap-2">
+            <div class="mt-4 flex flex-wrap gap-2">
               <Button variant="outline" size="sm" @click="selectAllUnconfigured">Select All Unconfigured</Button>
+              <Button variant="outline" size="sm" @click="selectFirstHalf" v-if="stdPorts.length > 0">Select 1st Half (1-{{ halfStdPortsCount }})</Button>
+              <Button variant="outline" size="sm" @click="selectSecondHalf" v-if="stdPorts.length > 0">Select 2nd Half ({{ halfStdPortsCount + 1 }}-{{ stdPorts.length }})</Button>
+              <Button variant="outline" size="sm" @click="selectAllUplinks" v-if="uplinkPortsList.length > 0">Select All Uplinks</Button>
               <Button variant="outline" size="sm" @click="clearSelection" v-if="selectedPortIds.length > 0">Clear Selection</Button>
             </div>
           </CardContent>
@@ -588,6 +799,19 @@ onUnmounted(() => {
                 <p class="text-[10px] text-muted-foreground uppercase tracking-wider mb-1">Editing {{ selectedPortIds.length }} Port(s)</p>
                 <div class="flex flex-wrap gap-1 max-h-[80px] overflow-y-auto">
                   <Badge variant="outline" v-for="port in selectedPortsData" :key="port.id" class="text-[10px] font-mono">{{ port.id }}</Badge>
+                </div>
+              </div>
+
+              <!-- Quick Presets -->
+              <div class="space-y-1.5 bg-muted/40 border rounded-md p-2.5">
+                <p class="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider mb-1">Quick Presets</p>
+                <div class="grid grid-cols-2 gap-2">
+                  <Button variant="secondary" size="sm" class="text-xs h-8 font-medium justify-center" @click="applyPresetCctv">
+                    📹 CCTV (V32)
+                  </Button>
+                  <Button variant="secondary" size="sm" class="text-xs h-8 font-medium justify-center" @click="applyPresetUplinkDownlink">
+                    🔗 Uplink (V90 Trunk)
+                  </Button>
                 </div>
               </div>
 
@@ -610,7 +834,7 @@ onUnmounted(() => {
                 </div>
                 <div v-if="selectedPortsData[0].mode === 'access'" class="space-y-1.5">
                   <Label>Access VLAN ID</Label>
-                  <Input :model-value="selectedPortsData[0].vlan" @update:model-value="val => applyToSelected('vlan', val)" type="number" min="1" max="4094" />
+                  <Input :model-value="String(selectedPortsData[0].vlan || '')" @update:model-value="val => handleVlanInput('vlan', val)" type="text" placeholder="1-4094" />
                 </div>
                 <div v-if="selectedPortsData[0].mode === 'trunk'" class="space-y-1.5">
                   <Label>Allowed Trunk VLANs</Label>
@@ -618,7 +842,7 @@ onUnmounted(() => {
                 </div>
                 <div v-if="selectedPortsData[0].mode === 'trunk'" class="space-y-1.5">
                   <Label>Native VLAN (Optional)</Label>
-                  <Input :model-value="selectedPortsData[0].native_vlan" @update:model-value="val => applyToSelected('native_vlan', val)" placeholder="e.g. 99" type="number" min="1" max="4094" />
+                  <Input :model-value="String(selectedPortsData[0].native_vlan || '')" @update:model-value="val => handleVlanInput('native_vlan', val)" placeholder="e.g. 99" type="text" />
                 </div>
                 <div class="pt-2">
                   <Button variant="destructive" size="sm" class="w-full" @click="markUnconfigured">Remove Configuration</Button>
@@ -648,7 +872,7 @@ onUnmounted(() => {
                 </Button>
                 <Button variant="outline" @click="printSummary">🖨️ Print Summary</Button>
                 <Button :disabled="loading || !hostname.trim()" @click="generateConfig">
-                  {{ loading ? 'Saving & Generating…' : 'Generate & Save' }}
+                  {{ loading ? 'Saving & Generating…' : (editingDeploymentId ? '💾 Update Configuration' : 'Generate & Save') }}
                 </Button>
               </div>
             </div>
@@ -696,6 +920,8 @@ onUnmounted(() => {
               <h3 class="font-bold text-lg text-slate-700 border-b pb-1">Services & Management</h3>
               <div><span class="font-semibold text-slate-500 w-32 inline-block">SSH Service:</span> {{ enableSsh ? 'Enabled' : 'Disabled' }}</div>
               <div><span class="font-semibold text-slate-500 w-32 inline-block">Web Management:</span> {{ enableWeb ? 'Enabled' : 'Disabled' }}</div>
+              <div><span class="font-semibold text-slate-500 w-32 inline-block">Timezone:</span> {{ selectedTimezone }}</div>
+              <div v-if="ntpServers"><span class="font-semibold text-slate-500 w-32 inline-block">NTP Servers:</span> {{ ntpServers }}</div>
               <div v-if="mgmtIp"><span class="font-semibold text-slate-500 w-32 inline-block">Management IP:</span> {{ mgmtIp }} (VLAN {{ mgmtVlan }})</div>
               
               <div v-if="inventoryTag" class="mt-4 border p-2 rounded-md inline-flex items-center gap-4 bg-slate-50">

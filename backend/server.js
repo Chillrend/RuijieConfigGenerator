@@ -164,13 +164,159 @@ app.delete('/api/deployments/:id', async (req, res) => {
   }
 });
 
+// ── PUT /api/deployments/:id ────────────────────────────────
+app.put('/api/deployments/:id', async (req, res) => {
+  try {
+    const deploymentId = req.params.id;
+    const existing = await db.get('SELECT * FROM deployments WHERE id = ?', deploymentId);
+    if (!existing) {
+      return res.status(404).json({ error: 'Deployment not found' });
+    }
+
+    const {
+      serialNumber,
+      serial_number,
+      macAddress,
+      mac_address,
+      hostname,
+      mgmtIp,
+      mgmt_ip,
+      inventoryTag,
+      inventory_tag,
+      generated_cli,
+      generatedCli,
+    } = req.body;
+
+    const newSN = (serialNumber !== undefined ? serialNumber : serial_number !== undefined ? serial_number : existing.serial_number)?.trim();
+    const newMac = (macAddress !== undefined ? macAddress : mac_address !== undefined ? mac_address : existing.mac_address)?.trim() || null;
+    const newHostname = (hostname !== undefined ? hostname : existing.hostname)?.trim();
+    const newMgmtIp = (mgmtIp !== undefined ? mgmtIp : mgmt_ip !== undefined ? mgmt_ip : existing.mgmt_ip)?.trim() || null;
+    const newInventoryTag = (inventoryTag !== undefined ? inventoryTag : inventory_tag !== undefined ? inventory_tag : existing.inventory_tag)?.trim() || null;
+
+    if (!newSN) {
+      return res.status(400).json({ error: 'Serial Number is required' });
+    }
+
+    // Check unique conflict for Serial Number
+    if (newSN !== existing.serial_number) {
+      const conflictSN = await db.get('SELECT id FROM deployments WHERE serial_number = ? AND id != ?', [newSN, deploymentId]);
+      if (conflictSN) {
+        return res.status(409).json({ error: 'A deployment with this Serial Number already exists.' });
+      }
+    }
+
+    // Check unique conflict for MAC Address
+    if (newMac && newMac !== existing.mac_address) {
+      const conflictMac = await db.get('SELECT id FROM deployments WHERE mac_address = ? AND id != ?', [newMac, deploymentId]);
+      if (conflictMac) {
+        return res.status(409).json({ error: 'A deployment with this MAC Address already exists.' });
+      }
+    }
+
+    // Check unique conflict for Management IP
+    if (newMgmtIp && newMgmtIp !== existing.mgmt_ip) {
+      const conflictIP = await db.get('SELECT id FROM deployments WHERE mgmt_ip = ? AND id != ?', [newMgmtIp, deploymentId]);
+      if (conflictIP) {
+        return res.status(409).json({ error: 'A deployment with this Management IP already exists.' });
+      }
+    }
+
+    // Update config_payload and re-generate CLI if possible
+    let updatedPayload = existing.config_payload;
+    let updatedCli = (generated_cli !== undefined ? generated_cli : generatedCli !== undefined ? generatedCli : existing.generated_cli);
+
+    try {
+      const payloadObj = JSON.parse(existing.config_payload || '{}');
+      payloadObj.hostname = newHostname;
+      payloadObj.serialNumber = newSN;
+      payloadObj.macAddress = newMac;
+      payloadObj.mgmtIp = newMgmtIp;
+      updatedPayload = JSON.stringify(payloadObj);
+
+      // Only regenerate CLI if generated_cli was not explicitly provided by the user
+      if (generated_cli === undefined && generatedCli === undefined) {
+        const hwRow = await db.get('SELECT * FROM hardware_templates WHERE id = ?', [existing.model_id]);
+        if (hwRow && Array.isArray(payloadObj.ports)) {
+          const model = {
+            ...hwRow,
+            uplinkPorts: JSON.parse(hwRow.uplinkPorts)
+          };
+          const uplinkSet = new Set(model.uplinkPorts);
+          const mappedPorts = payloadObj.ports
+            .filter((port) => port.configured)
+            .map((port) => {
+              const portNumber = port.id;
+              const isUplink = uplinkSet.has(portNumber);
+              const prefix = isUplink ? model.uplinkPrefix : model.portPrefix;
+              return {
+                mappedName: `${prefix}${portNumber}`,
+                mode: port.mode || 'access',
+                vlan: port.vlan || 1,
+                allowed_vlans: port.allowed_vlans || 'all',
+                native_vlan: port.native_vlan || '',
+                description: port.description || '',
+                poeMode: port.poeMode || 'default',
+                poePriority: port.poePriority || 'default',
+                poeMaxPower: port.poeMaxPower || '',
+              };
+            });
+
+          let ntpList = [];
+          if (Array.isArray(payloadObj.ntpServers)) {
+            ntpList = payloadObj.ntpServers;
+          } else if (typeof payloadObj.ntpServers === 'string') {
+            ntpList = payloadObj.ntpServers.split(',').map(s => s.trim()).filter(Boolean);
+          }
+
+          let configText = configTemplate({
+            hostname: newHostname,
+            timezone: payloadObj.timezone || '',
+            ntpServers: ntpList,
+            enablePassword: payloadObj.enablePassword || '',
+            adminUsername: payloadObj.adminUsername || '',
+            adminPassword: payloadObj.adminPassword || '',
+            enableWeb: !!payloadObj.enableWeb,
+            enableSsh: !!payloadObj.enableSsh,
+            enableCwmp: !!payloadObj.enableCwmp,
+            mgmtVlan: payloadObj.mgmtVlan || '',
+            mgmtIp: newMgmtIp || '',
+            mgmtMask: payloadObj.mgmtMask || '',
+            mgmtGateway: payloadObj.mgmtGateway || '',
+            vlans: payloadObj.vlans || [],
+            ports: mappedPorts,
+          });
+
+          updatedCli = configText.split('\n').filter(line => line.trim() !== '').join('\n');
+        }
+      }
+    } catch (e) {
+      console.error('Error re-generating config text on update:', e);
+    }
+
+    await db.run(`
+      UPDATE deployments
+      SET serial_number = ?, mac_address = ?, hostname = ?, mgmt_ip = ?, inventory_tag = ?, config_payload = ?, generated_cli = ?
+      WHERE id = ?
+    `, [newSN, newMac, newHostname, newMgmtIp, newInventoryTag, updatedPayload, updatedCli, deploymentId]);
+
+    const updated = await db.get('SELECT * FROM deployments WHERE id = ?', deploymentId);
+    res.json(updated);
+  } catch (err) {
+    console.error('Failed to update deployment:', err);
+    res.status(500).json({ error: 'Failed to update deployment' });
+  }
+});
+
 // ── POST /api/generate-config ───────────────────────────────
 app.post('/api/generate-config', async (req, res) => {
   const {
+    editingDeploymentId,
     serialNumber,
     macAddress,
     hostname,
     modelId,
+    timezone,
+    ntpServers,
     vlans,
     ports,
     enablePassword,
@@ -190,21 +336,39 @@ app.post('/api/generate-config', async (req, res) => {
   }
 
   // Conflict checking
-  const existingSN = await db.get('SELECT id FROM deployments WHERE serial_number = ?', [serialNumber]);
-  if (existingSN) {
-    return res.status(409).json({ error: 'A deployment with this Serial Number already exists.' });
-  }
-  if (macAddress) {
-    const existingMac = await db.get('SELECT id FROM deployments WHERE mac_address = ?', [macAddress]);
-    if (existingMac) {
-      return res.status(409).json({ error: 'A deployment with this MAC Address already exists.' });
+  if (editingDeploymentId) {
+    const existingSN = await db.get('SELECT id FROM deployments WHERE serial_number = ? AND id != ?', [serialNumber, editingDeploymentId]);
+    if (existingSN) {
+      return res.status(409).json({ error: 'A deployment with this Serial Number already exists.' });
     }
-  }
-
-  if (mgmtIp) {
-    const existingIP = await db.get('SELECT id FROM deployments WHERE mgmt_ip = ?', [mgmtIp]);
-    if (existingIP) {
-      return res.status(409).json({ error: 'A deployment with this Management IP already exists.' });
+    if (macAddress) {
+      const existingMac = await db.get('SELECT id FROM deployments WHERE mac_address = ? AND id != ?', [macAddress, editingDeploymentId]);
+      if (existingMac) {
+        return res.status(409).json({ error: 'A deployment with this MAC Address already exists.' });
+      }
+    }
+    if (mgmtIp) {
+      const existingIP = await db.get('SELECT id FROM deployments WHERE mgmt_ip = ? AND id != ?', [mgmtIp, editingDeploymentId]);
+      if (existingIP) {
+        return res.status(409).json({ error: 'A deployment with this Management IP already exists.' });
+      }
+    }
+  } else {
+    const existingSN = await db.get('SELECT id FROM deployments WHERE serial_number = ?', [serialNumber]);
+    if (existingSN) {
+      return res.status(409).json({ error: 'A deployment with this Serial Number already exists.' });
+    }
+    if (macAddress) {
+      const existingMac = await db.get('SELECT id FROM deployments WHERE mac_address = ?', [macAddress]);
+      if (existingMac) {
+        return res.status(409).json({ error: 'A deployment with this MAC Address already exists.' });
+      }
+    }
+    if (mgmtIp) {
+      const existingIP = await db.get('SELECT id FROM deployments WHERE mgmt_ip = ?', [mgmtIp]);
+      if (existingIP) {
+        return res.status(409).json({ error: 'A deployment with this Management IP already exists.' });
+      }
     }
   }
 
@@ -239,8 +403,17 @@ app.post('/api/generate-config', async (req, res) => {
       };
     });
 
+  let ntpList = [];
+  if (Array.isArray(ntpServers)) {
+    ntpList = ntpServers;
+  } else if (typeof ntpServers === 'string') {
+    ntpList = ntpServers.split(',').map(s => s.trim()).filter(Boolean);
+  }
+
   let configText = configTemplate({
     hostname,
+    timezone: timezone || '',
+    ntpServers: ntpList,
     enablePassword: enablePassword || '',
     adminUsername: adminUsername || '',
     adminPassword: adminPassword || '',
@@ -256,6 +429,22 @@ app.post('/api/generate-config', async (req, res) => {
   });
 
   configText = configText.split('\n').filter(line => line.trim() !== '').join('\n');
+
+  if (editingDeploymentId) {
+    const currentDep = await db.get('SELECT inventory_tag FROM deployments WHERE id = ?', editingDeploymentId);
+    const existingTag = currentDep?.inventory_tag || `INV-${Math.random().toString(36).substring(2, 10).toUpperCase()}`;
+    try {
+      await db.run(`
+        UPDATE deployments
+        SET serial_number = ?, mac_address = ?, hostname = ?, model_id = ?, mgmt_ip = ?, config_payload = ?, generated_cli = ?, inventory_tag = ?
+        WHERE id = ?
+      `, [serialNumber, macAddress || null, hostname, modelId, mgmtIp || null, JSON.stringify(req.body), configText, existingTag, editingDeploymentId]);
+    } catch (err) {
+      console.error('Error updating deployment:', err);
+      return res.status(500).json({ error: 'Failed to update deployment in database' });
+    }
+    return res.json({ configText, inventoryTag: existingTag, updated: true });
+  }
 
   // Generate random inventory tag (INV- + 8 random uppercase alphanumerics)
   const charset = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';

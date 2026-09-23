@@ -1,5 +1,6 @@
 <script setup>
 import { ref, onMounted, nextTick } from 'vue'
+import { useRouter } from 'vue-router'
 import JsBarcode from 'jsbarcode'
 import bwipjs from 'bwip-js'
 
@@ -14,7 +15,11 @@ import {
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+
+const router = useRouter()
 
 const deployments = ref([])
 const hardwareOptions = ref([])
@@ -22,6 +27,19 @@ const loading = ref(true)
 
 const selectedDeployment = ref(null)
 const showModal = ref(false)
+
+const showEditModal = ref(false)
+const editForm = ref({
+  id: null,
+  hostname: '',
+  serial_number: '',
+  mac_address: '',
+  mgmt_ip: '',
+  inventory_tag: '',
+})
+const editError = ref('')
+const editLoading = ref(false)
+const savingCli = ref(false)
 
 const barcodeSn = ref(null)
 const barcodeMac = ref(null)
@@ -122,6 +140,100 @@ async function deleteDeployment(id, hostname) {
   }
 }
 
+function openEditModal(dep) {
+  editForm.value = {
+    id: dep.id,
+    hostname: dep.hostname || '',
+    serial_number: dep.serial_number || '',
+    mac_address: dep.mac_address || '',
+    mgmt_ip: dep.mgmt_ip || '',
+    inventory_tag: dep.inventory_tag || '',
+  }
+  editError.value = ''
+  showEditModal.value = true
+}
+
+function closeEditModal() {
+  showEditModal.value = false
+  editError.value = ''
+}
+
+function reconfigureDeployment(id) {
+  router.push({ path: '/', query: { edit: id } })
+}
+
+async function saveRawCli() {
+  if (!selectedDeployment.value) return
+  savingCli.value = true
+  try {
+    const res = await fetch(`/api/deployments/${selectedDeployment.value.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        generated_cli: selectedDeployment.value.generated_cli,
+      }),
+    })
+    const data = await res.json()
+    if (!res.ok) {
+      alert(data.error || 'Failed to save CLI changes')
+      return
+    }
+    alert('CLI changes saved successfully!')
+    await fetchDeployments()
+  } catch (err) {
+    alert('Error saving CLI: ' + err.message)
+  } finally {
+    savingCli.value = false
+  }
+}
+
+async function saveDeploymentEdit() {
+  if (!editForm.value.hostname.trim()) {
+    editError.value = 'Hostname is required'
+    return
+  }
+  if (!editForm.value.serial_number.trim()) {
+    editError.value = 'Serial Number is required'
+    return
+  }
+
+  editLoading.value = true
+  editError.value = ''
+
+  try {
+    const res = await fetch(`/api/deployments/${editForm.value.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        hostname: editForm.value.hostname.trim(),
+        serial_number: editForm.value.serial_number.trim(),
+        mac_address: editForm.value.mac_address.trim() || null,
+        mgmt_ip: editForm.value.mgmt_ip.trim() || null,
+        inventory_tag: editForm.value.inventory_tag.trim() || null,
+      }),
+    })
+
+    const data = await res.json()
+    if (!res.ok) {
+      editError.value = data.error || 'Failed to update deployment'
+      return
+    }
+
+    await fetchDeployments()
+
+    if (selectedDeployment.value && selectedDeployment.value.id === editForm.value.id) {
+      data.parsedPayload = JSON.parse(data.config_payload || '{}')
+      selectedDeployment.value = data
+    }
+
+    showEditModal.value = false
+  } catch (err) {
+    editError.value = err.message || 'Error updating deployment'
+  } finally {
+    editLoading.value = false
+  }
+}
+
 function formatDate(dateStr) {
   return new Date(dateStr).toLocaleString()
 }
@@ -156,6 +268,7 @@ onMounted(() => {
               <TableHead>S/N</TableHead>
               <TableHead>MAC</TableHead>
               <TableHead>IP</TableHead>
+              <TableHead>Inv Tag</TableHead>
               <TableHead class="text-right">Actions</TableHead>
             </TableRow>
           </TableHeader>
@@ -167,15 +280,18 @@ onMounted(() => {
               <TableCell class="font-mono text-xs">{{ dep.serial_number }}</TableCell>
               <TableCell class="font-mono text-xs text-muted-foreground">{{ dep.mac_address || 'N/A' }}</TableCell>
               <TableCell>{{ dep.mgmt_ip || '-' }}</TableCell>
+              <TableCell class="font-mono text-xs">{{ dep.inventory_tag || '-' }}</TableCell>
               <TableCell class="text-right">
                 <div class="flex justify-end gap-2">
                   <Button variant="outline" size="sm" @click="viewDeployment(dep.id)">View</Button>
+                  <Button variant="secondary" size="sm" @click="reconfigureDeployment(dep.id)">🛠️ Reconfigure</Button>
+                  <Button variant="outline" size="sm" @click="openEditModal(dep)">Edit Info</Button>
                   <Button variant="destructive" size="sm" @click="deleteDeployment(dep.id, dep.hostname)">Delete</Button>
                 </div>
               </TableCell>
             </TableRow>
             <TableRow v-if="deployments.length === 0">
-              <TableCell colspan="7" class="text-center py-10 text-muted-foreground">No deployments found.</TableCell>
+              <TableCell colspan="8" class="text-center py-10 text-muted-foreground">No deployments found.</TableCell>
             </TableRow>
           </TableBody>
         </Table>
@@ -191,6 +307,8 @@ onMounted(() => {
             <CardDescription>{{ formatDate(selectedDeployment.created_at) }}</CardDescription>
           </div>
           <div class="flex gap-2">
+            <Button variant="secondary" @click="reconfigureDeployment(selectedDeployment.id)">🛠️ Reconfigure</Button>
+            <Button variant="outline" @click="openEditModal(selectedDeployment)">✏️ Edit Info</Button>
             <Button variant="outline" @click="printDocument">🖨️ Print</Button>
             <Button variant="ghost" @click="close">Close</Button>
           </div>
@@ -219,6 +337,8 @@ onMounted(() => {
                   <h3 class="font-bold text-lg border-b pb-1">Services & Management</h3>
                   <div><span class="font-semibold text-muted-foreground w-32 inline-block">SSH Service:</span> {{ selectedDeployment.parsedPayload.enableSsh ? 'Enabled' : 'Disabled' }}</div>
                   <div><span class="font-semibold text-muted-foreground w-32 inline-block">Web Management:</span> {{ selectedDeployment.parsedPayload.enableWeb ? 'Enabled' : 'Disabled' }}</div>
+                  <div v-if="selectedDeployment.parsedPayload.timezone"><span class="font-semibold text-muted-foreground w-32 inline-block">Timezone:</span> {{ selectedDeployment.parsedPayload.timezone }}</div>
+                  <div v-if="selectedDeployment.parsedPayload.ntpServers"><span class="font-semibold text-muted-foreground w-32 inline-block">NTP Servers:</span> {{ Array.isArray(selectedDeployment.parsedPayload.ntpServers) ? selectedDeployment.parsedPayload.ntpServers.join(', ') : selectedDeployment.parsedPayload.ntpServers }}</div>
                   <div v-if="selectedDeployment.mgmt_ip"><span class="font-semibold text-muted-foreground w-32 inline-block">Management IP:</span> {{ selectedDeployment.mgmt_ip }} (VLAN {{ selectedDeployment.parsedPayload.mgmtVlan }})</div>
                 </div>
               </div>
@@ -255,8 +375,14 @@ onMounted(() => {
               </div>
             </TabsContent>
 
-            <TabsContent value="cli" class="p-6 m-0 outline-none">
-              <textarea class="w-full bg-slate-950 text-emerald-400 font-mono text-sm p-4 rounded-md border min-h-[400px]" readonly :value="selectedDeployment.generated_cli"></textarea>
+            <TabsContent value="cli" class="p-6 m-0 outline-none space-y-3">
+              <div class="flex items-center justify-between">
+                <span class="text-xs text-muted-foreground">You can edit the raw CLI below and save changes directly to this deployment.</span>
+                <Button size="sm" @click="saveRawCli" :disabled="savingCli">
+                  {{ savingCli ? 'Saving...' : '💾 Save CLI Changes' }}
+                </Button>
+              </div>
+              <textarea v-model="selectedDeployment.generated_cli" class="w-full bg-slate-950 text-emerald-400 font-mono text-sm p-4 rounded-md border min-h-[400px]"></textarea>
             </TabsContent>
           </Tabs>
         </CardContent>
@@ -280,6 +406,8 @@ onMounted(() => {
             <h3 class="font-bold text-lg text-slate-700 border-b pb-1">Services & Management</h3>
             <div><span class="font-semibold text-slate-500 w-32 inline-block">SSH Service:</span> {{ selectedDeployment.parsedPayload.enableSsh ? 'Enabled' : 'Disabled' }}</div>
             <div><span class="font-semibold text-slate-500 w-32 inline-block">Web Management:</span> {{ selectedDeployment.parsedPayload.enableWeb ? 'Enabled' : 'Disabled' }}</div>
+            <div v-if="selectedDeployment.parsedPayload.timezone"><span class="font-semibold text-slate-500 w-32 inline-block">Timezone:</span> {{ selectedDeployment.parsedPayload.timezone }}</div>
+            <div v-if="selectedDeployment.parsedPayload.ntpServers"><span class="font-semibold text-slate-500 w-32 inline-block">NTP Servers:</span> {{ Array.isArray(selectedDeployment.parsedPayload.ntpServers) ? selectedDeployment.parsedPayload.ntpServers.join(', ') : selectedDeployment.parsedPayload.ntpServers }}</div>
             <div v-if="selectedDeployment.mgmt_ip"><span class="font-semibold text-slate-500 w-32 inline-block">Management IP:</span> {{ selectedDeployment.mgmt_ip }} (VLAN {{ selectedDeployment.parsedPayload.mgmtVlan }})</div>
             
             <div v-if="selectedDeployment.inventory_tag" class="mt-4 border p-2 rounded-md inline-flex items-center gap-4 bg-slate-50">
@@ -370,6 +498,61 @@ onMounted(() => {
           </tbody>
         </table>
       </div>
+    </div>
+
+    <!-- Edit Deployment Modal -->
+    <div v-if="showEditModal" class="fixed inset-0 z-50 bg-background/80 backdrop-blur-sm flex items-center justify-center p-4 print:hidden">
+      <Card class="w-full max-w-lg shadow-xl">
+        <CardHeader class="border-b pb-4">
+          <CardTitle>Edit Deployment Record</CardTitle>
+          <CardDescription>Update identity or inventory information for this switch.</CardDescription>
+        </CardHeader>
+        <CardContent class="p-6 space-y-4">
+          <div v-if="editError" class="bg-destructive/15 text-destructive text-sm p-3 rounded-md">
+            {{ editError }}
+          </div>
+
+          <div class="space-y-1.5">
+            <Label for="edit-hostname">Hostname</Label>
+            <Input id="edit-hostname" v-model="editForm.hostname" placeholder="e.g. CORE-SW-01" />
+          </div>
+
+          <div class="grid grid-cols-2 gap-4">
+            <div class="space-y-1.5">
+              <Label for="edit-sn">Serial Number</Label>
+              <Input id="edit-sn" v-model="editForm.serial_number" placeholder="S/N" />
+            </div>
+            <div class="space-y-1.5">
+              <Label for="edit-mac">MAC Address</Label>
+              <Input id="edit-mac" v-model="editForm.mac_address" placeholder="e.g. 00:11:22:33:44:55" />
+            </div>
+          </div>
+
+          <div class="grid grid-cols-2 gap-4">
+            <div class="space-y-1.5">
+              <Label for="edit-ip">Management IP</Label>
+              <Input id="edit-ip" v-model="editForm.mgmt_ip" placeholder="e.g. 10.90.0.10" />
+            </div>
+            <div class="space-y-1.5">
+              <Label for="edit-tag">Inventory Tag</Label>
+              <Input id="edit-tag" v-model="editForm.inventory_tag" placeholder="e.g. INV-12345678" />
+            </div>
+          </div>
+
+          <div class="pt-2">
+            <Button variant="secondary" size="sm" class="w-full text-xs font-medium" @click="reconfigureDeployment(editForm.id)">
+              🛠️ Open in Full Provisioner (Edit Ports & VLANs)
+            </Button>
+          </div>
+
+          <div class="flex justify-end gap-2 pt-4 border-t">
+            <Button variant="outline" @click="closeEditModal" :disabled="editLoading">Cancel</Button>
+            <Button @click="saveDeploymentEdit" :disabled="editLoading">
+              {{ editLoading ? 'Saving...' : 'Save Changes' }}
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
     </div>
   </main>
 </template>

@@ -1,6 +1,16 @@
 !
 hostname {{hostname}}
 !
+{{#if timezone}}
+clock timezone {{timezone}}
+!
+{{/if}}
+{{#if ntpServers}}
+{{#each ntpServers}}
+ntp server {{this}}
+{{/each}}
+!
+{{/if}}
 {{#if enableWeb}}
 enable service web-server
 enable service web-server http
