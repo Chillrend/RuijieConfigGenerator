@@ -164,7 +164,7 @@ const drawLabel = async () => {
       bwipjs.toCanvas(tempCanvas, {
         bcid: 'datamatrix',
         text: props.inventoryTag,
-        scale: 3, 
+        scale: 4, 
         height: 10,
         includetext: false,
       })
