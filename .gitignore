@@ -11,6 +11,8 @@ frontend/dist-ssr/
 .env
 .env.local
 .env.*.local
+backend/.env
+frontend/.env
 
 # Database (Security: Prevents committing internal network topologies)
 backend/data/db.json

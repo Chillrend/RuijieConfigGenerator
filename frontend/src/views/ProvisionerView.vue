@@ -356,6 +356,7 @@ async function generateConfig() {
     const res = await fetch('/api/generate-config', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
       body: JSON.stringify({
         editingDeploymentId: editingDeploymentId.value,
         serialNumber: serialNumber.value.trim(),
@@ -450,7 +451,7 @@ function handleClickOutside(e) {
 async function loadDeploymentForEdit(id) {
   isLoadingDeployment.value = true
   try {
-    const res = await fetch(`/api/deployments/${id}`)
+    const res = await fetch(`/api/deployments/${id}`, { credentials: 'include' })
     if (!res.ok) {
       alert('Deployment not found.')
       return
@@ -526,7 +527,7 @@ watch(() => route.query.edit, (newId) => {
 onMounted(async () => {
   document.addEventListener('click', handleClickOutside)
   try {
-    const res = await fetch('/api/setup')
+    const res = await fetch('/api/setup', { credentials: 'include' })
     const data = await res.json()
     hardwareOptions.value = data.hardware || []
     vlanDatabase.value = data.vlans || []

@@ -49,7 +49,7 @@ const barcodeInventory = ref(null)
 
 async function fetchSetup() {
   try {
-    const res = await fetch('/api/setup')
+    const res = await fetch('/api/setup', { credentials: 'include' })
     const data = await res.json()
     hardwareOptions.value = data.hardware || []
   } catch (err) {
@@ -60,7 +60,7 @@ async function fetchSetup() {
 async function fetchDeployments() {
   loading.value = true
   try {
-    const res = await fetch('/api/deployments')
+    const res = await fetch('/api/deployments', { credentials: 'include' })
     deployments.value = await res.json()
   } catch (err) {
     console.error('Failed to fetch deployments', err)
@@ -79,7 +79,7 @@ function getPortName(port, modelId) {
 
 async function viewDeployment(id) {
   try {
-    const res = await fetch(`/api/deployments/${id}`)
+    const res = await fetch(`/api/deployments/${id}`, { credentials: 'include' })
     const data = await res.json()
     data.parsedPayload = JSON.parse(data.config_payload)
     selectedDeployment.value = data
@@ -130,7 +130,10 @@ async function deleteDeployment(id, hostname) {
     return
   }
   try {
-    const res = await fetch(`/api/deployments/${id}`, { method: 'DELETE' })
+    const res = await fetch(`/api/deployments/${id}`, { 
+      method: 'DELETE',
+      credentials: 'include'
+    })
     if (res.ok) {
       deployments.value = deployments.value.filter(d => d.id !== id)
     } else {
@@ -171,6 +174,7 @@ async function saveRawCli() {
     const res = await fetch(`/api/deployments/${selectedDeployment.value.id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
       body: JSON.stringify({
         generated_cli: selectedDeployment.value.generated_cli,
       }),
@@ -206,6 +210,7 @@ async function saveDeploymentEdit() {
     const res = await fetch(`/api/deployments/${editForm.value.id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
       body: JSON.stringify({
         hostname: editForm.value.hostname.trim(),
         serial_number: editForm.value.serial_number.trim(),

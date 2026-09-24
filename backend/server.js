@@ -6,6 +6,14 @@ import { fileURLToPath } from 'url';
 import sqlite3 from 'sqlite3';
 import { open } from 'sqlite';
 import Handlebars from 'handlebars';
+import passport from 'passport';
+import { Strategy as GoogleStrategy } from 'passport-google-oauth20';
+import jwt from 'jsonwebtoken';
+import cookieParser from 'cookie-parser';
+import dotenv from 'dotenv';
+
+// Load environment variables
+dotenv.config();
 
 // --- ESM __dirname workaround ---
 const __filename = fileURLToPath(import.meta.url);
@@ -99,12 +107,97 @@ const configTemplate = Handlebars.compile(templateSource);
 // 3. Express App
 // ────────────────────────────────────────────────────────────
 const app = express();
-app.use(cors());
+// Configure CORS to allow credentials from the frontend
+app.use(cors({
+  origin: 'http://localhost:5173', // Vite default port
+  credentials: true
+}));
 app.use(express.json());
+app.use(cookieParser());
 app.use(express.static(path.join(__dirname, 'public')));
 
+// ────────────────────────────────────────────────────────────
+// 3.5 Authentication Setup
+// ────────────────────────────────────────────────────────────
+const JWT_SECRET = process.env.JWT_SECRET || 'fallback_secret_do_not_use_in_prod';
+const ALLOWED_EMAILS = (process.env.ALLOWED_EMAILS || '').split(',').map(e => e.trim().toLowerCase());
+
+passport.use(new GoogleStrategy({
+    clientID: process.env.GOOGLE_CLIENT_ID || 'dummy',
+    clientSecret: process.env.GOOGLE_CLIENT_SECRET || 'dummy',
+    callbackURL: process.env.GOOGLE_CALLBACK_URL || '/api/auth/google/callback'
+  },
+  function(accessToken, refreshToken, profile, cb) {
+    const email = profile.emails?.[0]?.value?.toLowerCase();
+    if (!email) {
+      return cb(new Error('No email found in Google profile.'));
+    }
+    
+    // Check if user is in the allowed list
+    if (ALLOWED_EMAILS.length > 0 && !ALLOWED_EMAILS.includes(email) && process.env.ALLOWED_EMAILS) {
+      return cb(null, false, { message: 'Unauthorized email' });
+    }
+    
+    return cb(null, { id: profile.id, email: email, name: profile.displayName, avatar: profile.photos?.[0]?.value });
+  }
+));
+
+app.use(passport.initialize());
+
+// Authentication Middleware
+const requireAuth = (req, res, next) => {
+  const token = req.cookies.auth_token;
+  if (!token) return res.status(401).json({ error: 'Unauthorized: No token provided' });
+
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.user = decoded;
+    next();
+  } catch (err) {
+    return res.status(401).json({ error: 'Unauthorized: Invalid token' });
+  }
+};
+
+// ── Auth Routes ─────────────────────────────────────────────
+app.get('/api/auth/google',
+  passport.authenticate('google', { scope: ['profile', 'email'] })
+);
+
+app.get('/api/auth/google/callback', (req, res, next) => {
+  // Use FRONTEND_URL if specified in environment (e.g. for local Vite dev https://localhost:5173)
+  // Fallback to empty string for relative paths in Docker where backend/frontend are on same port
+  const frontendUrl = process.env.FRONTEND_URL || '';
+  
+  passport.authenticate('google', { 
+    session: false, 
+    failureRedirect: `${frontendUrl}/login?error=unauthorized` 
+  })(req, res, () => {
+    // Generate JWT
+    const token = jwt.sign(req.user, JWT_SECRET, { expiresIn: '24h' });
+    
+    // Set HTTP-only cookie
+    res.cookie('auth_token', token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      maxAge: 24 * 60 * 60 * 1000 // 24 hours
+    });
+    
+    res.redirect(`${frontendUrl}/`);
+  });
+});
+
+app.get('/api/auth/me', requireAuth, (req, res) => {
+  res.json({ user: req.user });
+});
+
+app.post('/api/auth/logout', (req, res) => {
+  res.clearCookie('auth_token');
+  res.json({ success: true });
+});
+
 // ── GET /api/setup ──────────────────────────────────────────
-app.get('/api/setup', async (_req, res) => {
+app.get('/api/setup', requireAuth, async (_req, res) => {
   const hardwareRows = await db.all('SELECT * FROM hardware_templates');
   const vlans = await db.all('SELECT * FROM vlans');
   
@@ -117,13 +210,13 @@ app.get('/api/setup', async (_req, res) => {
 });
 
 // ── GET /api/deployments ────────────────────────────────────
-app.get('/api/deployments', async (_req, res) => {
+app.get('/api/deployments', requireAuth, async (_req, res) => {
   const deployments = await db.all('SELECT id, serial_number, mac_address, hostname, model_id, mgmt_ip, inventory_tag, created_at FROM deployments ORDER BY created_at DESC');
   res.json(deployments);
 });
 
 // ── GET /api/deployments/export/csv ─────────────────────────
-app.get('/api/deployments/export/csv', async (_req, res) => {
+app.get('/api/deployments/export/csv', requireAuth, async (_req, res) => {
   try {
     const deployments = await db.all('SELECT id, serial_number, mac_address, hostname, model_id, mgmt_ip, inventory_tag, created_at FROM deployments ORDER BY created_at DESC');
     
@@ -141,7 +234,7 @@ app.get('/api/deployments/export/csv', async (_req, res) => {
 });
 
 // ── GET /api/deployments/:id ────────────────────────────────
-app.get('/api/deployments/:id', async (req, res) => {
+app.get('/api/deployments/:id', requireAuth, async (req, res) => {
   const deployment = await db.get('SELECT * FROM deployments WHERE id = ?', req.params.id);
   if (deployment) {
     res.json(deployment);
@@ -151,7 +244,7 @@ app.get('/api/deployments/:id', async (req, res) => {
 });
 
 // ── DELETE /api/deployments/:id ─────────────────────────────
-app.delete('/api/deployments/:id', async (req, res) => {
+app.delete('/api/deployments/:id', requireAuth, async (req, res) => {
   try {
     const result = await db.run('DELETE FROM deployments WHERE id = ?', req.params.id);
     if (result.changes > 0) {
@@ -165,7 +258,7 @@ app.delete('/api/deployments/:id', async (req, res) => {
 });
 
 // ── PUT /api/deployments/:id ────────────────────────────────
-app.put('/api/deployments/:id', async (req, res) => {
+app.put('/api/deployments/:id', requireAuth, async (req, res) => {
   try {
     const deploymentId = req.params.id;
     const existing = await db.get('SELECT * FROM deployments WHERE id = ?', deploymentId);
@@ -308,7 +401,7 @@ app.put('/api/deployments/:id', async (req, res) => {
 });
 
 // ── POST /api/generate-config ───────────────────────────────
-app.post('/api/generate-config', async (req, res) => {
+app.post('/api/generate-config', requireAuth, async (req, res) => {
   const {
     editingDeploymentId,
     serialNumber,
