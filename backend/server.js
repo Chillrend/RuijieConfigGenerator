@@ -45,6 +45,19 @@ async function initDB() {
       name TEXT
     );
 
+    CREATE TABLE IF NOT EXISTS port_profiles (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT,
+      mode TEXT,
+      vlan TEXT,
+      allowed_vlans TEXT,
+      native_vlan TEXT,
+      description TEXT,
+      poeMode TEXT,
+      poePriority TEXT,
+      poeMaxPower TEXT
+    );
+
     CREATE TABLE IF NOT EXISTS deployments (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       serial_number TEXT UNIQUE,
@@ -85,6 +98,29 @@ async function initDB() {
           await stmt.run(vlan.id, vlan.name);
         }
         await stmt.finalize();
+      }
+      if (data.portProfiles) {
+        const stmt = await db.prepare('INSERT INTO port_profiles (name, mode, vlan, allowed_vlans, native_vlan, description, poeMode, poePriority, poeMaxPower) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
+        for (const profile of data.portProfiles) {
+          await stmt.run(profile.name, profile.mode, profile.vlan, profile.allowed_vlans, profile.native_vlan, profile.description, profile.poeMode, profile.poePriority, profile.poeMaxPower);
+        }
+        await stmt.finalize();
+      }
+    }
+  } else {
+    // If we have hardware but maybe no port_profiles yet (migration)
+    const profileCount = await db.get('SELECT COUNT(*) as count FROM port_profiles');
+    if (profileCount.count === 0) {
+      const jsonPath = path.join(__dirname, 'data', 'db.json');
+      if (fs.existsSync(jsonPath)) {
+        const data = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'));
+        if (data.portProfiles) {
+          const stmt = await db.prepare('INSERT INTO port_profiles (name, mode, vlan, allowed_vlans, native_vlan, description, poeMode, poePriority, poeMaxPower) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
+          for (const profile of data.portProfiles) {
+            await stmt.run(profile.name, profile.mode, profile.vlan, profile.allowed_vlans, profile.native_vlan, profile.description, profile.poeMode, profile.poePriority, profile.poeMaxPower);
+          }
+          await stmt.finalize();
+        }
       }
     }
   }
@@ -200,13 +236,57 @@ app.post('/api/auth/logout', (req, res) => {
 app.get('/api/setup', requireAuth, async (_req, res) => {
   const hardwareRows = await db.all('SELECT * FROM hardware_templates');
   const vlans = await db.all('SELECT * FROM vlans');
+  const portProfiles = await db.all('SELECT * FROM port_profiles');
   
   const hardware = hardwareRows.map(hw => ({
     ...hw,
     uplinkPorts: JSON.parse(hw.uplinkPorts)
   }));
 
-  res.json({ hardware, vlans });
+  res.json({ hardware, vlans, portProfiles });
+});
+
+// ── POST /api/port-profiles ─────────────────────────────────
+app.post('/api/port-profiles', requireAuth, async (req, res) => {
+  const { name, mode, vlan, allowed_vlans, native_vlan, description, poeMode, poePriority, poeMaxPower } = req.body;
+  if (!name) return res.status(400).json({ error: 'Name is required' });
+  try {
+    const result = await db.run(
+      'INSERT INTO port_profiles (name, mode, vlan, allowed_vlans, native_vlan, description, poeMode, poePriority, poeMaxPower) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [name, mode || 'access', vlan || '1', allowed_vlans || 'all', native_vlan || '', description || '', poeMode || 'default', poePriority || 'default', poeMaxPower || '']
+    );
+    const newProfile = await db.get('SELECT * FROM port_profiles WHERE id = ?', result.lastID);
+    res.json(newProfile);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to create port profile' });
+  }
+});
+
+// ── PUT /api/port-profiles/:id ──────────────────────────────
+app.put('/api/port-profiles/:id', requireAuth, async (req, res) => {
+  const { name, mode, vlan, allowed_vlans, native_vlan, description, poeMode, poePriority, poeMaxPower } = req.body;
+  if (!name) return res.status(400).json({ error: 'Name is required' });
+  try {
+    await db.run(
+      'UPDATE port_profiles SET name = ?, mode = ?, vlan = ?, allowed_vlans = ?, native_vlan = ?, description = ?, poeMode = ?, poePriority = ?, poeMaxPower = ? WHERE id = ?',
+      [name, mode || 'access', vlan || '1', allowed_vlans || 'all', native_vlan || '', description || '', poeMode || 'default', poePriority || 'default', poeMaxPower || '', req.params.id]
+    );
+    const updated = await db.get('SELECT * FROM port_profiles WHERE id = ?', req.params.id);
+    res.json(updated);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to update port profile' });
+  }
+});
+
+// ── DELETE /api/port-profiles/:id ───────────────────────────
+app.delete('/api/port-profiles/:id', requireAuth, async (req, res) => {
+  try {
+    const result = await db.run('DELETE FROM port_profiles WHERE id = ?', req.params.id);
+    if (result.changes > 0) res.json({ success: true });
+    else res.status(404).json({ error: 'Port profile not found' });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to delete port profile' });
+  }
 });
 
 // ── GET /api/deployments ────────────────────────────────────

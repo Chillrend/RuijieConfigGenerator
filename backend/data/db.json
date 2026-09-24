@@ -1,0 +1,260 @@
+{
+  "vlans": [
+    {
+      "id": 3,
+      "name": "0003-Server152"
+    },
+    {
+      "id": 5,
+      "name": "0005-Server172"
+    },
+    {
+      "id": 9,
+      "name": "0009-AntarSwitch"
+    },
+    {
+      "id": 10,
+      "name": "0010-Q2"
+    },
+    {
+      "id": 11,
+      "name": "0011-Q1"
+    },
+    {
+      "id": 12,
+      "name": "0012-TS"
+    },
+    {
+      "id": 13,
+      "name": "0013-TM"
+    },
+    {
+      "id": 14,
+      "name": "0014-TE"
+    },
+    {
+      "id": 15,
+      "name": "0015-AK"
+    },
+    {
+      "id": 16,
+      "name": "0016-AN"
+    },
+    {
+      "id": 18,
+      "name": "0018-PERPUS"
+    },
+    {
+      "id": 19,
+      "name": "0019-ALBER"
+    },
+    {
+      "id": 20,
+      "name": "0020-TGP"
+    },
+    {
+      "id": 21,
+      "name": "0021-GSG"
+    },
+    {
+      "id": 22,
+      "name": "0022-BankMini"
+    },
+    {
+      "id": 23,
+      "name": "0023-PUSDATIN"
+    },
+    {
+      "id": 24,
+      "name": "0024-IT"
+    },
+    {
+      "id": 25,
+      "name": "0025-Kearsipan"
+    },
+    {
+      "id": 26,
+      "name": "0026-WNBK"
+    },
+    {
+      "id": 27,
+      "name": "0027-RuangPimpinan"
+    },
+    {
+      "id": 28,
+      "name": "0028-Keuangan"
+    },
+    {
+      "id": 29,
+      "name": "0029-MesinAbsen"
+    },
+    {
+      "id": 30,
+      "name": "0030-Q3"
+    },
+    {
+      "id": 31,
+      "name": "0031-LabGsg"
+    },
+    {
+      "id": 32,
+      "name": "0032-CCTVSPC"
+    },
+    {
+      "id": 33,
+      "name": "0033-GedungPUT"
+    },
+    {
+      "id": 34,
+      "name": "0034-Dev-Login-Inet"
+    },
+    {
+      "id": 35,
+      "name": "0035-Event"
+    },
+    {
+      "id": 90,
+      "name": "0090-AntarSwitchBaru"
+    },
+    {
+      "id": 103,
+      "name": "0103-IPPublic103"
+    },
+    {
+      "id": 152,
+      "name": "0152-ServerDMZ"
+    },
+    {
+      "id": 1103,
+      "name": "1103-IPPublic1103"
+    }
+  ],
+  "hardware": [
+    {
+      "id": "RG-S6150-48VS8CQ-X",
+      "portPrefix": "TFGigabitEthernet 0/",
+      "totalPorts": 48,
+      "uplinkPrefix": "HundredGigabitEthernet 0/",
+      "uplinkPorts": [
+        49,
+        50,
+        51,
+        52,
+        53,
+        54,
+        55,
+        56
+      ]
+    },
+    {
+      "id": "RG-S5315-24MG6XS-UP-E",
+      "portPrefix": "GigabitEthernet 0/",
+      "totalPorts": 24,
+      "uplinkPrefix": "TenGigabitEthernet 0/",
+      "uplinkPorts": [
+        25,
+        26,
+        27,
+        28,
+        29,
+        30
+      ]
+    },
+    {
+      "id": "RG-S5350-24GT4XS-P-E",
+      "portPrefix": "GigabitEthernet 0/",
+      "totalPorts": 24,
+      "uplinkPrefix": "TenGigabitEthernet 0/",
+      "uplinkPorts": [
+        25,
+        26,
+        27,
+        28
+      ]
+    },
+    {
+      "id": "RG-S5350-24GT4XS-E",
+      "portPrefix": "GigabitEthernet 0/",
+      "totalPorts": 24,
+      "uplinkPrefix": "TenGigabitEthernet 0/",
+      "uplinkPorts": [
+        25,
+        26,
+        27,
+        28
+      ]
+    },
+    {
+      "id": "RG-S5350-12GT4XS-P-E",
+      "portPrefix": "GigabitEthernet 0/",
+      "totalPorts": 12,
+      "uplinkPrefix": "TenGigabitEthernet 0/",
+      "uplinkPorts": [
+        13,
+        14,
+        15,
+        16
+      ]
+    },
+    {
+      "id": "RG-S5000-10GT2MS-P-E",
+      "portPrefix": "GigabitEthernet 0/",
+      "totalPorts": 10,
+      "uplinkPrefix": "TenGigabitEthernet 0/",
+      "uplinkPorts": [
+        11,
+        12
+      ]
+    },
+    {
+      "id": "RG-IS5200-24GT4XS-UP-DC",
+      "portPrefix": "GigabitEthernet 0/",
+      "totalPorts": 24,
+      "uplinkPrefix": "TenGigabitEthernet 0/",
+      "uplinkPorts": [
+        25,
+        26,
+        27,
+        28
+      ]
+    }
+  ],
+  "portProfiles": [
+    {
+      "id": 1,
+      "name": "\ud83d\udcf9 CCTV (V32)",
+      "mode": "access",
+      "vlan": "32",
+      "allowed_vlans": "all",
+      "native_vlan": "",
+      "description": "CCTV",
+      "poeMode": "default",
+      "poePriority": "default",
+      "poeMaxPower": ""
+    },
+    {
+      "id": 2,
+      "name": "\ud83d\udd17 Uplink (V90 Trunk)",
+      "mode": "trunk",
+      "vlan": "1",
+      "allowed_vlans": "all",
+      "native_vlan": "90",
+      "description": "UPLINK/DOWNLINK",
+      "poeMode": "default",
+      "poePriority": "default",
+      "poeMaxPower": ""
+    },
+    {
+      "id": 3,
+      "name": "\ud83d\udcf6 Wireless AP",
+      "mode": "access",
+      "vlan": "24",
+      "allowed_vlans": "all",
+      "native_vlan": "",
+      "description": "Access Point",
+      "poeMode": "enabled",
+      "poePriority": "critical",
+      "poeMaxPower": "30000"
+    }
+  ]
+}

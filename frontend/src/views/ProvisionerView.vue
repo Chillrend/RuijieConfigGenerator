@@ -55,6 +55,7 @@ const mgmtGateway = ref('10.90.0.1')
 const selectedModelId = ref('RG-S5350-24GT4XS-P-E')
 const hardwareOptions = ref([])
 const vlanDatabase = ref([])
+const portProfiles = ref([])
 const selectedVlans = ref([])
 const ports = ref([])
 
@@ -234,24 +235,36 @@ function ensureVlanInSelected(vlanId, defaultName) {
   }
 }
 
-function applyPresetCctv() {
-  ensureVlanInSelected(32, '0032-CCTVSPC')
-  for (const port of selectedPortsData.value) {
-    port.configured = true
-    port.mode = 'access'
-    port.vlan = '32'
-    port.description = 'CCTV'
+function applyProfile(profile) {
+  if (profile.mode === 'access' && profile.vlan) {
+    ensureVlanInSelected(profile.vlan, `VLAN ${profile.vlan}`)
+  } else if (profile.mode === 'trunk') {
+    if (profile.native_vlan) {
+      ensureVlanInSelected(profile.native_vlan, `VLAN ${profile.native_vlan}`)
+    }
+    if (profile.allowed_vlans && profile.allowed_vlans !== 'all') {
+      const vlans = profile.allowed_vlans.split(',').map(v => v.trim())
+      for (const v of vlans) {
+        if (v && !isNaN(Number(v))) {
+          ensureVlanInSelected(v, `VLAN ${v}`)
+        }
+      }
+    }
   }
-}
 
-function applyPresetUplinkDownlink() {
-  ensureVlanInSelected(90, '0090-AntarSwitchBaru')
   for (const port of selectedPortsData.value) {
     port.configured = true
-    port.mode = 'trunk'
-    port.allowed_vlans = 'all'
-    port.native_vlan = '90'
-    port.description = 'UPLINK/DOWNLINK'
+    port.mode = profile.mode || 'access'
+    if (port.mode === 'access') {
+      port.vlan = profile.vlan || '1'
+    } else {
+      port.allowed_vlans = profile.allowed_vlans || 'all'
+      port.native_vlan = profile.native_vlan || ''
+    }
+    port.description = profile.description || ''
+    port.poeMode = profile.poeMode || 'default'
+    port.poePriority = profile.poePriority || 'default'
+    port.poeMaxPower = profile.poeMaxPower || ''
   }
 }
 
@@ -531,6 +544,7 @@ onMounted(async () => {
     const data = await res.json()
     hardwareOptions.value = data.hardware || []
     vlanDatabase.value = data.vlans || []
+    portProfiles.value = data.portProfiles || []
     selectedVlans.value = [...(data.vlans || [])]
     buildPorts()
     if (route.query.edit) {
@@ -805,15 +819,20 @@ onUnmounted(() => {
                 </div>
               </div>
 
-              <!-- Quick Presets -->
-              <div class="space-y-1.5 bg-muted/40 border rounded-md p-2.5">
-                <p class="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider mb-1">Quick Presets</p>
+              <!-- Port Profiles (Presets) -->
+              <div class="space-y-1.5 bg-muted/40 border rounded-md p-2.5" v-if="portProfiles.length > 0">
+                <p class="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider mb-1">Port Profiles</p>
                 <div class="grid grid-cols-2 gap-2">
-                  <Button variant="secondary" size="sm" class="text-xs h-8 font-medium justify-center" @click="applyPresetCctv">
-                    📹 CCTV (V32)
-                  </Button>
-                  <Button variant="secondary" size="sm" class="text-xs h-8 font-medium justify-center" @click="applyPresetUplinkDownlink">
-                    🔗 Uplink (V90 Trunk)
+                  <Button 
+                    v-for="profile in portProfiles" 
+                    :key="profile.id"
+                    variant="secondary" 
+                    size="sm" 
+                    class="text-xs h-8 font-medium justify-center" 
+                    @click="applyProfile(profile)"
+                    :title="profile.description || profile.name"
+                  >
+                    {{ profile.name }}
                   </Button>
                 </div>
               </div>
@@ -847,6 +866,43 @@ onUnmounted(() => {
                   <Label>Native VLAN (Optional)</Label>
                   <Input :model-value="String(selectedPortsData[0].native_vlan || '')" @update:model-value="val => handleVlanInput('native_vlan', val)" placeholder="e.g. 99" type="text" />
                 </div>
+                
+                <!-- PoE Configuration -->
+                <div class="space-y-1.5 pt-2 border-t mt-2">
+                  <Label>Power over Ethernet (PoE)</Label>
+                  <Select :model-value="selectedPortsData[0].poeMode || 'default'" @update:model-value="val => applyToSelected('poeMode', val)">
+                    <SelectTrigger class="h-8 text-xs">
+                      <SelectValue placeholder="PoE Mode" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="default">Default (Enabled)</SelectItem>
+                      <SelectItem value="enabled">Force Enabled</SelectItem>
+                      <SelectItem value="disabled">Disabled</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                
+                <div v-if="selectedPortsData[0].poeMode && selectedPortsData[0].poeMode !== 'disabled'" class="grid grid-cols-2 gap-2">
+                  <div class="space-y-1.5">
+                    <Label class="text-xs">PoE Priority</Label>
+                    <Select :model-value="selectedPortsData[0].poePriority || 'default'" @update:model-value="val => applyToSelected('poePriority', val)">
+                      <SelectTrigger class="h-8 text-xs">
+                        <SelectValue placeholder="Priority" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="default">Default (Low)</SelectItem>
+                        <SelectItem value="low">Low</SelectItem>
+                        <SelectItem value="high">High</SelectItem>
+                        <SelectItem value="critical">Critical</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div class="space-y-1.5">
+                    <Label class="text-xs">Max Power (mW)</Label>
+                    <Input :model-value="selectedPortsData[0].poeMaxPower || ''" @update:model-value="val => applyToSelected('poeMaxPower', val)" placeholder="e.g. 30000" class="h-8 text-xs" />
+                  </div>
+                </div>
+
                 <div class="pt-2">
                   <Button variant="destructive" size="sm" class="w-full" @click="markUnconfigured">Remove Configuration</Button>
                 </div>
