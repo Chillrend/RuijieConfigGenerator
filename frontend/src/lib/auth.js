@@ -11,6 +11,14 @@ export const authState = reactive({
 });
 
 export const checkAuth = async () => {
+  // Dev mode bypass
+  if (import.meta.env.VITE_DISABLE_AUTH === 'true' && import.meta.env.DEV) {
+    authState.isAuthenticated = true;
+    authState.user = { id: 'dev', email: 'dev@localhost', name: 'Dev User' };
+    authState.initialized = true;
+    return;
+  }
+
   try {
     const res = await fetch(`${API_BASE}/api/auth/me`, {
       credentials: 'include'

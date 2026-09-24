@@ -182,6 +182,12 @@ app.use(passport.initialize());
 
 // Authentication Middleware
 const requireAuth = (req, res, next) => {
+  // Dev mode bypass
+  if (process.env.DISABLE_AUTH === 'true' && process.env.NODE_ENV !== 'production') {
+    req.user = { id: 'dev', email: 'dev@localhost', name: 'Dev User' };
+    return next();
+  }
+
   const token = req.cookies.auth_token;
   if (!token) return res.status(401).json({ error: 'Unauthorized: No token provided' });
 
