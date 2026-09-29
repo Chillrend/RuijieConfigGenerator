@@ -18,6 +18,8 @@ frontend/.env
 backend/data/db.json
 backend/data/*.sqlite
 backend/data/*.sqlite-journal
+*.sqlite
+*.sqlite3
 
 # Logs
 npm-debug.log*

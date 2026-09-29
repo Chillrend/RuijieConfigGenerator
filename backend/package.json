@@ -8,18 +8,23 @@
     "dev": "node --watch server.js"
   },
   "dependencies": {
+    "@influxdata/influxdb-client": "^1.35.0",
+    "bullmq": "^6.3.9",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
     "dotenv": "^18.0.3",
     "express": "^4.21.0",
     "handlebars": "^4.7.8",
     "html5-qrcode": "^2.3.8",
+    "ioredis": "^6.0.0",
     "jsonwebtoken": "^9.0.3",
     "lowdb": "^7.0.1",
     "passport": "^0.7.0",
     "passport-google-oauth20": "^2.0.0",
+    "pg": "^8.23.0",
     "qrcode": "^1.5.4",
     "sqlite": "^5.1.1",
-    "sqlite3": "^6.0.1"
+    "sqlite3": "^6.0.1",
+    "ssh2": "^1.17.0"
   }
 }
