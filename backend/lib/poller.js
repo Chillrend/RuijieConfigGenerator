@@ -14,6 +14,7 @@ import {
   shortPortName
 } from './ruijie-parser.js';
 import { recordOpticalMetrics } from './influx.js';
+import { getRedis } from './redis.js';
 
 // Fast TCP connectivity check before SSH
 function checkTcpPort(host, port = 22, timeout = 3000) {
@@ -63,15 +64,34 @@ export async function pollSwitch(switchId) {
 
   // 2. Execute SSH inspection commands
   try {
-    const commands = [
-      'show version',
-      'show interfaces status',
-      'show interfaces transceiver',
-      'show interfaces transceiver manuinfo',
-      'show poe interfaces status',
-      'show lldp neighbors detail',
-      'show running-config'
-    ];
+    const redis = getRedis();
+    let hasLiveTelemetry = false;
+    try {
+      const liveRaw = await redis.get(`sw:${sw.mgmt_ip}:telemetry`);
+      if (liveRaw) {
+        const live = JSON.parse(liveRaw);
+        if (Array.isArray(live.interfaces) && live.interfaces.length > 0) {
+          hasLiveTelemetry = true;
+        }
+      }
+    } catch (e) {}
+
+    // Only skip SSH metric commands if gRPC is CONFIRMED actively streaming live interface telemetry!
+    const isGrpcActive = sw.telemetry_mode === 'grpc' && hasLiveTelemetry;
+    const commands = isGrpcActive
+      ? [
+          'show version',
+          'show running-config'
+        ]
+      : [
+          'show version',
+          'show interfaces status',
+          'show interfaces transceiver',
+          'show interfaces transceiver manuinfo',
+          'show poe interfaces status',
+          'show lldp neighbors detail',
+          'show running-config'
+        ];
 
     const rawOutput = await runSshSession(
       sw.mgmt_ip,
@@ -86,20 +106,23 @@ export async function pollSwitch(switchId) {
 
     // 3. Extract and parse isolated command outputs
     const rawVersion = extractCommandOutput(rawOutput, 'show version');
-    const rawStatus = extractCommandOutput(rawOutput, 'show interfaces status');
-    const rawTrans = extractCommandOutput(rawOutput, 'show interfaces transceiver');
-    const rawManu = extractCommandOutput(rawOutput, 'show interfaces transceiver manuinfo');
-    const rawPoe = extractCommandOutput(rawOutput, 'show poe interfaces status');
-    const rawLldp = extractCommandOutput(rawOutput, 'show lldp neighbors detail');
     const rawConfig = extractCommandOutput(rawOutput, 'show running-config');
+    const rawStatus = !isGrpcActive ? extractCommandOutput(rawOutput, 'show interfaces status') : '';
+    const rawTrans = !isGrpcActive ? extractCommandOutput(rawOutput, 'show interfaces transceiver') : '';
+    const rawManu = !isGrpcActive ? extractCommandOutput(rawOutput, 'show interfaces transceiver manuinfo') : '';
+    const rawPoe = !isGrpcActive ? extractCommandOutput(rawOutput, 'show poe interfaces status') : '';
+    const rawLldp = !isGrpcActive ? extractCommandOutput(rawOutput, 'show lldp neighbors detail') : '';
 
     const ver = parseShowVersion(rawVersion || rawOutput);
-    const ifStatuses = parseInterfacesStatus(rawStatus || rawOutput);
-    const manuinfo = parseTransceiverManuinfo(rawManu || rawOutput);
-    const ddm = parseTransceiverDDM(rawTrans || rawOutput, manuinfo);
-    const poeStatuses = parsePoeInterfacesStatus(rawPoe || rawOutput);
-    const lldp = parseLLDPNeighbors(rawLldp || rawOutput);
+    const ifStatuses = !isGrpcActive ? parseInterfacesStatus(rawStatus || rawOutput) : [];
+    const manuinfo = !isGrpcActive ? parseTransceiverManuinfo(rawManu || rawOutput) : new Map();
+    const ddm = !isGrpcActive ? parseTransceiverDDM(rawTrans || rawOutput, manuinfo) : [];
+    const poeStatuses = !isGrpcActive ? parsePoeInterfacesStatus(rawPoe || rawOutput) : [];
+    const lldp = !isGrpcActive ? parseLLDPNeighbors(rawLldp || rawOutput) : (sw.lldp_json ? JSON.parse(sw.lldp_json) : []);
     const configParsed = parseRunningConfig(rawConfig || rawOutput);
+
+    // Switch is in gRPC mode only if live telemetry is confirmed active; otherwise falls back to SSH
+    const finalTelemetryMode = hasLiveTelemetry ? 'grpc' : 'ssh';
 
     // Build map of interface status
     const statusMap = new Map();
@@ -252,6 +275,7 @@ export async function pollSwitch(switchId) {
         lldp_json = ?,
         optical_json = ?,
         raw_config = ?,
+        telemetry_mode = ?,
         updated_at = CURRENT_TIMESTAMP
        WHERE id = ?`,
       [
@@ -263,8 +287,9 @@ export async function pollSwitch(switchId) {
         ver.version || sw.software_version || '',
         JSON.stringify(combinedPorts),
         JSON.stringify(lldp),
-        JSON.stringify(ddm),
+        JSON.stringify(ddm.length > 0 ? ddm : (sw.optical_json ? JSON.parse(sw.optical_json) : [])),
         rawConfig || rawOutput,
+        finalTelemetryMode,
         switchId
       ]
     );

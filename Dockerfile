@@ -12,8 +12,11 @@ RUN npm run build
 FROM node:20-alpine
 WORKDIR /app/backend
 
-# Install python, make, g++ for sqlite3 building from source
-RUN apk add --no-cache python3 make g++
+# Install python, make, g++, curl, bash for native modules & tools
+RUN apk add --no-cache python3 make g++ curl bash
+
+# Install gnmic binary
+RUN curl -sL https://raw.githubusercontent.com/openconfig/gnmic/master/install.sh | bash
 
 # Install backend dependencies
 COPY backend/package*.json ./
@@ -22,12 +25,16 @@ RUN npm ci
 # Copy backend source
 COPY backend/ ./
 
-# Create public directory if it doesn't exist, and copy built frontend
+# Create public directory and copy built frontend
 RUN mkdir -p public
 COPY --from=frontend-builder /app/frontend/dist ./public/
 
-# Expose the backend port
-EXPOSE 3001
+# Copy entrypoint script
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
-# Start the server
-CMD ["node", "server.js"]
+# Expose HTTP/WebSocket API (3001) and gRPC Dial-Out Telemetry Listener (50051)
+EXPOSE 3001 50051
+
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+CMD []

@@ -227,6 +227,8 @@ async function runSchema(db, type) {
       ports_json ${textType},
       lldp_json ${textType},
       optical_json ${textType},
+      telemetry_mode ${textType} DEFAULT 'ssh',
+      grpc_status ${textType} DEFAULT 'disabled',
       created_at ${timestampType},
       updated_at ${timestampType}
     );
@@ -246,6 +248,18 @@ async function runSchema(db, type) {
 
   try {
     await db.exec('ALTER TABLE deployments ADD COLUMN inventory_tag TEXT');
+  } catch (e) {
+    // Column might already exist
+  }
+
+  try {
+    await db.exec("ALTER TABLE switches ADD COLUMN telemetry_mode TEXT DEFAULT 'ssh'");
+  } catch (e) {
+    // Column might already exist
+  }
+
+  try {
+    await db.exec("ALTER TABLE switches ADD COLUMN grpc_status TEXT DEFAULT 'disabled'");
   } catch (e) {
     // Column might already exist
   }

@@ -1,6 +1,7 @@
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { io } from 'socket.io-client'
 import { Icon } from '@iconify/vue'
 import { Button } from '../components/ui/button'
 import { Badge } from '../components/ui/badge'
@@ -19,6 +20,99 @@ const syncing = ref(false)
 const activeTab = ref('ports') // 'ports' | 'optical' | 'lldp' | 'config'
 const opticalHistory = ref([])
 const errorMsg = ref('')
+const deployingGrpc = ref(false)
+
+let socket = null
+
+const setupWebSocket = () => {
+  if (!sw.value || !sw.value.mgmt_ip) return
+  if (socket) socket.disconnect()
+
+  socket = io(window.location.origin, {
+    transports: ['websocket', 'polling']
+  })
+
+  socket.on('connect', () => {
+    socket.emit('join:switch', sw.value.mgmt_ip)
+  })
+
+  socket.on('telemetry:update', (telemetry) => {
+    if (!sw.value || telemetry.mgmt_ip !== sw.value.mgmt_ip) return
+    sw.value.status = 'online'
+    sw.value.telemetry_source = 'grpc'
+    sw.value.last_seen = telemetry.last_seen
+
+    // Live update interfaces & ports
+    if (Array.isArray(telemetry.interfaces) && sw.value.ports) {
+      const ifMap = new Map()
+      telemetry.interfaces.forEach(i => {
+        ifMap.set(i.name, i)
+        ifMap.set(i.shortName, i)
+      })
+
+      const poeMap = new Map()
+      ;(telemetry.poe || []).forEach(p => {
+        poeMap.set(p.port, p)
+        poeMap.set(p.portShort, p)
+      })
+
+      const optMap = new Map()
+      ;(telemetry.optical || []).forEach(o => {
+        optMap.set(o.port, o)
+        optMap.set(o.portShort, o)
+      })
+
+      const lldpMap = new Map()
+      ;(telemetry.lldp || []).forEach(l => {
+        lldpMap.set(l.localPort, l)
+        lldpMap.set(l.localPortShort, l)
+      })
+
+      for (const p of sw.value.ports) {
+        const liveIf = ifMap.get(p.name) || ifMap.get(p.shortName)
+        if (liveIf) {
+          p.operStatus = liveIf.operStatus || p.operStatus
+          p.speed = liveIf.speed || p.speed
+          p.duplex = liveIf.duplex || p.duplex
+          if (liveIf.counters) p.counters = liveIf.counters
+        }
+
+        const livePoe = poeMap.get(p.name) || poeMap.get(p.shortName)
+        if (livePoe) {
+          p.poeStatus = livePoe.powerStatus || p.poeStatus
+          p.poePower = livePoe.watt || 0
+          p.poePowerStr = livePoe.currPower || `${livePoe.watt}W`
+        }
+
+        const liveOpt = optMap.get(p.name) || optMap.get(p.shortName)
+        if (liveOpt) {
+          p.optical = liveOpt
+        }
+
+        const livePeer = lldpMap.get(p.name) || lldpMap.get(p.shortName)
+        if (livePeer) {
+          p.uplinkNeighbor = livePeer.remoteDevice
+          p.uplinkNeighborPort = livePeer.remotePort
+          p.isUplink = livePeer.isUplink || p.isUplink
+        }
+      }
+
+      if (Array.isArray(telemetry.optical) && telemetry.optical.length > 0) {
+        sw.value.optical = telemetry.optical
+      }
+      if (Array.isArray(telemetry.lldp) && telemetry.lldp.length > 0) {
+        sw.value.lldp = telemetry.lldp
+      }
+    }
+  })
+}
+
+onUnmounted(() => {
+  if (socket) {
+    if (sw.value?.mgmt_ip) socket.emit('leave:switch', sw.value.mgmt_ip)
+    socket.disconnect()
+  }
+})
 
 // Port configuration modal state
 const selectedPort = ref(null)
@@ -46,11 +140,47 @@ const fetchSwitch = async () => {
     if (!res.ok) throw new Error('Failed to load switch details')
     const data = await res.json()
     sw.value = data.switch
+    setupWebSocket()
     await fetchOpticalHistory()
   } catch (err) {
     errorMsg.value = err.message
   } finally {
     loading.value = false
+  }
+}
+
+const formatAllowedVlans = (vlans) => {
+  if (!vlans || vlans.toLowerCase() === 'all') return 'ALL'
+  const trimmed = vlans.trim()
+  if (trimmed.length > 12) {
+    return trimmed.substring(0, 10) + '…'
+  }
+  return trimmed
+}
+
+const deployGrpcToThisSwitch = async () => {
+  if (!confirm(`Deploy gRPC Dial-Out Telemetry configuration to ${sw.value?.hostname || sw.value?.mgmt_ip}? This will configure the switch to push metrics directly to the gRPC collector.`)) return
+  deployingGrpc.value = true
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), 20000)
+  try {
+    const res = await fetch('/api/fleet/global-config/deploy-grpc', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ switchIds: [sw.value.id] }),
+      signal: controller.signal
+    })
+    clearTimeout(timeoutId)
+    const data = await res.json()
+    if (!res.ok) throw new Error(data.error || 'Failed to deploy gRPC')
+    alert('gRPC telemetry deployed successfully! The switch will now stream directly to backend.')
+    await fetchSwitch()
+  } catch (err) {
+    alert(`Deploy failed: ${err.name === 'AbortError' ? 'Request timed out after 20s' : err.message}`)
+  } finally {
+    clearTimeout(timeoutId)
+    deployingGrpc.value = false
   }
 }
 
@@ -299,6 +429,22 @@ onMounted(() => {
                 >
                   <span class="w-1.5 h-1.5 rounded-full bg-white mr-1.5 animate-pulse" v-if="sw.status === 'online'" />
                   {{ sw.status }}
+                </Badge>
+                <Badge
+                  v-if="sw.telemetry_source === 'grpc' || sw.is_live_grpc"
+                  variant="outline"
+                  class="text-xs bg-emerald-500/10 text-emerald-600 border-emerald-500/20 font-mono flex items-center gap-1"
+                >
+                  <Icon icon="carbon:flash" class="w-3.5 h-3.5 text-emerald-600" />
+                  gRPC Realtime
+                </Badge>
+                <Badge
+                  v-else
+                  variant="outline"
+                  class="text-xs bg-zinc-500/10 text-zinc-500 border-zinc-500/20 font-mono flex items-center gap-1"
+                >
+                  <Icon icon="carbon:terminal" class="w-3.5 h-3.5" />
+                  SSH Fallback
                 </Badge>
                 <span class="text-xs px-2 py-0.5 rounded-md font-mono bg-muted text-muted-foreground border">
                   {{ sw.inventory_tag || 'INV-NONE' }}
@@ -563,18 +709,18 @@ onMounted(() => {
       <!-- TAB 1: Ports Table -->
       <div v-if="activeTab === 'ports'" class="border rounded-xl bg-card overflow-hidden shadow-xs">
         <div class="overflow-x-auto">
-          <table class="w-full text-left border-collapse text-sm">
+          <table class="w-full text-left border-collapse text-xs">
             <thead>
-              <tr class="border-b bg-muted/40 text-xs font-semibold text-muted-foreground uppercase tracking-wider">
-                <th class="py-3 px-4 min-w-[220px]">Port</th>
-                <th class="py-3 px-4">Link Status</th>
-                <th class="py-3 px-4">Speed</th>
-                <th class="py-3 px-4">Mode</th>
-                <th class="py-3 px-4">VLAN</th>
-                <th class="py-3 px-4">PoE</th>
-                <th class="py-3 px-4">Uplink Peer</th>
-                <th class="py-3 px-4">Description</th>
-                <th class="py-3 px-4 text-right">Actions</th>
+              <tr class="border-b bg-muted/40 text-[11px] font-semibold text-muted-foreground uppercase tracking-wider">
+                <th class="py-2.5 px-3 min-w-[120px]">Port</th>
+                <th class="py-2.5 px-3">Link Status</th>
+                <th class="py-2.5 px-3">Speed</th>
+                <th class="py-2.5 px-3">Mode</th>
+                <th class="py-2.5 px-3">VLAN</th>
+                <th class="py-2.5 px-3">PoE</th>
+                <th class="py-2.5 px-3">Uplink Peer</th>
+                <th class="py-2.5 px-3">Description</th>
+                <th class="py-2.5 px-3 text-right">Actions</th>
               </tr>
             </thead>
             <tbody class="divide-y">
@@ -583,16 +729,18 @@ onMounted(() => {
                 :key="p.name"
                 class="hover:bg-muted/30 transition-colors"
               >
-                <td class="py-2.5 px-4 font-mono font-semibold text-xs whitespace-nowrap">
-                  <span>{{ p.name }}</span>
-                  <span v-if="p.aggregatePort" class="ml-1.5 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-blue-500/15 text-blue-600 dark:text-blue-400 font-mono border border-blue-400/20">
+                <!-- Port Name -->
+                <td class="py-2 px-3 font-mono font-semibold text-xs whitespace-nowrap">
+                  <span :title="p.name">{{ p.shortName || p.name }}</span>
+                  <span v-if="p.aggregatePort" class="ml-1 px-1.5 py-0.2 rounded text-[9px] font-semibold bg-blue-500/15 text-blue-600 dark:text-blue-400 font-mono border border-blue-400/20">
                     {{ p.aggregatePort }}
                   </span>
                 </td>
 
-                <td class="py-2.5 px-4">
+                <!-- Status -->
+                <td class="py-2 px-3">
                   <span
-                    class="inline-flex items-center gap-1.5 text-xs font-medium px-2 py-0.5 rounded-full whitespace-nowrap"
+                    class="inline-flex items-center gap-1.5 text-[11px] font-medium px-2 py-0.5 rounded-full whitespace-nowrap"
                     :class="p.operStatus === 'up' ? 'bg-emerald-500/10 text-emerald-600' : 'bg-zinc-500/10 text-zinc-500'"
                   >
                     <span class="w-1.5 h-1.5 rounded-full" :class="p.operStatus === 'up' ? 'bg-emerald-500' : 'bg-zinc-400'" />
@@ -600,50 +748,65 @@ onMounted(() => {
                   </span>
                 </td>
 
-                <td class="py-2.5 px-4 text-xs font-mono font-medium text-foreground whitespace-nowrap">
+                <!-- Speed -->
+                <td class="py-2 px-3 text-xs font-mono font-medium text-foreground whitespace-nowrap">
                   {{ p.speed || 'Auto' }}
                 </td>
 
-                <td class="py-2.5 px-4 text-xs capitalize font-medium">
+                <!-- Mode -->
+                <td class="py-2 px-3 text-xs capitalize font-medium">
                   {{ p.mode || 'access' }}
                 </td>
 
-                <td class="py-2.5 px-4 text-xs font-mono whitespace-nowrap">
-                  <span v-if="p.mode === 'access'" class="px-2 py-0.5 rounded bg-muted text-foreground font-medium">
+                <!-- VLAN with Tooltip -->
+                <td class="py-2 px-3 text-xs font-mono whitespace-nowrap">
+                  <span v-if="p.mode === 'access'" class="px-1.5 py-0.5 rounded bg-muted text-foreground font-medium text-[11px]">
                     VLAN {{ p.vlan || 1 }}
                   </span>
-                  <span v-else class="px-2 py-0.5 rounded bg-amber-500/10 text-amber-600 font-medium">
-                    {{ (p.allowed_vlans && p.allowed_vlans.toLowerCase() !== 'all') ? p.allowed_vlans : 'ALL' }}<span v-if="p.native_vlan" class="text-muted-foreground text-[11px]"> (N:{{ p.native_vlan }})</span>
+                  <span
+                    v-else
+                    :title="`Allowed VLANs: ${p.allowed_vlans || 'ALL'}${p.native_vlan ? ' (Native: ' + p.native_vlan + ')' : ''}`"
+                    class="px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-600 font-medium text-[11px] cursor-help inline-block max-w-[120px] truncate align-middle"
+                  >
+                    {{ formatAllowedVlans(p.allowed_vlans) }}<span v-if="p.native_vlan" class="text-muted-foreground text-[10px]"> (N:{{ p.native_vlan }})</span>
                   </span>
                 </td>
 
-                <td class="py-2.5 px-4 text-xs whitespace-nowrap">
-                  <span v-if="p.poeStatus === 'on' || p.poePower > 0" class="inline-flex items-center gap-1 text-amber-600 font-semibold bg-amber-500/10 px-2 py-0.5 rounded whitespace-nowrap">
-                    <Icon icon="ph:lightning-fill" class="w-3.5 h-3.5" />
+                <!-- PoE -->
+                <td class="py-2 px-3 text-xs whitespace-nowrap">
+                  <span v-if="p.poeStatus === 'on' || p.poePower > 0" class="inline-flex items-center gap-1 text-amber-600 font-semibold bg-amber-500/10 px-1.5 py-0.5 rounded text-[11px] whitespace-nowrap">
+                    <Icon icon="ph:lightning-fill" class="w-3 h-3" />
                     {{ p.poePowerStr || (p.poePower + 'W') }}
                   </span>
-                  <span v-else-if="p.poeMode === 'disabled'" class="inline-flex items-center gap-1 text-zinc-400 font-medium bg-muted px-2 py-0.5 rounded whitespace-nowrap">
-                    <Icon icon="ph:lightning-slash-fill" class="w-3.5 h-3.5 text-zinc-400" />
+                  <span v-else-if="p.poeMode === 'disabled'" class="inline-flex items-center gap-1 text-zinc-400 font-medium bg-muted px-1.5 py-0.5 rounded text-[11px] whitespace-nowrap">
+                    <Icon icon="ph:lightning-slash-fill" class="w-3 h-3 text-zinc-400" />
                     Disabled
                   </span>
-                  <span v-else-if="p.poeMode === 'enabled'" class="text-xs text-muted-foreground">Enabled (0W)</span>
-                  <span v-else class="text-muted-foreground">—</span>
+                  <span v-else-if="p.poeMode === 'enabled'" class="text-[11px] text-muted-foreground">Enabled (0W)</span>
+                  <span v-else class="text-muted-foreground text-[11px]">—</span>
                 </td>
 
-                <td class="py-2.5 px-4 text-xs">
-                  <div v-if="p.isUplink" class="inline-flex items-center gap-1 text-blue-600 font-semibold bg-blue-500/10 px-2 py-0.5 rounded whitespace-nowrap">
+                <!-- Uplink Peer -->
+                <td class="py-2 px-3 text-xs max-w-[140px] truncate">
+                  <div
+                    v-if="p.isUplink"
+                    :title="`${p.uplinkNeighbor || 'Uplink'}${p.uplinkNeighborPort ? ' (' + p.uplinkNeighborPort + ')' : ''}`"
+                    class="inline-flex items-center gap-1 text-blue-600 font-semibold bg-blue-500/10 px-1.5 py-0.5 rounded text-[11px] whitespace-nowrap cursor-help"
+                  >
                     <Icon icon="ph:arrow-fat-up-fill" class="w-3 h-3" />
-                    {{ p.uplinkNeighbor || 'Uplink' }} <span v-if="p.uplinkNeighborPort">({{ p.uplinkNeighborPort }})</span>
+                    <span class="truncate max-w-[110px]">{{ p.uplinkNeighbor || 'Uplink' }}</span>
                   </div>
-                  <span v-else class="text-muted-foreground">—</span>
+                  <span v-else class="text-muted-foreground text-[11px]">—</span>
                 </td>
 
-                <td class="py-2.5 px-4 text-xs text-muted-foreground truncate max-w-[180px]">
+                <!-- Description with Tooltip -->
+                <td class="py-2 px-3 text-xs text-muted-foreground max-w-[140px] truncate" :title="p.description || ''">
                   {{ p.description || '—' }}
                 </td>
 
-                <td class="py-2.5 px-4 text-right">
-                  <Button variant="outline" size="sm" class="h-7 text-xs" @click="openPortConfig(p)">
+                <!-- Action Button -->
+                <td class="py-2 px-3 text-right whitespace-nowrap">
+                  <Button variant="outline" size="sm" class="h-6 text-[11px] px-2.5 font-medium" @click="openPortConfig(p)">
                     Configure
                   </Button>
                 </td>
@@ -816,13 +979,54 @@ onMounted(() => {
       </div>
 
       <!-- TAB 4: Raw Running Config -->
-      <div v-if="activeTab === 'config'" class="border rounded-xl bg-card overflow-hidden shadow-xs">
-        <div class="p-4 border-b bg-muted/20 flex items-center justify-between">
-          <h3 class="font-semibold text-sm">Current Running Configuration</h3>
-          <span class="text-xs text-muted-foreground">Read-only live copy</span>
+      <div v-if="activeTab === 'config'" class="space-y-4">
+        <!-- Telemetry Mode Notice -->
+        <div
+          v-if="!sw.grpc_configured"
+          class="p-4 rounded-xl border border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400 flex items-start gap-3"
+        >
+          <Icon icon="carbon:warning-alt" class="w-5 h-5 shrink-0 mt-0.5 text-amber-500" />
+          <div class="flex-1 text-xs space-y-1">
+            <div class="font-bold text-sm">SSH Fallback Scraping Active — No gRPC Configuration Detected</div>
+            <p>
+              The switch running configuration does not contain any gRPC dial-out directives. Telemetry is currently scraped via periodic SSH commands.
+            </p>
+            <div class="pt-2">
+              <Button
+                size="sm"
+                variant="outline"
+                class="h-7 text-xs border-amber-500/40 text-amber-700 dark:text-amber-300 hover:bg-amber-500/20"
+                :disabled="deployingGrpc"
+                @click="deployGrpcToThisSwitch"
+              >
+                <Icon icon="carbon:flash" class="w-3.5 h-3.5 mr-1" />
+                {{ deployingGrpc ? 'Deploying gRPC...' : 'Enable gRPC Telemetry on this Switch' }}
+              </Button>
+            </div>
+          </div>
         </div>
-        <div class="p-4 bg-zinc-950 text-zinc-300 font-mono text-xs overflow-x-auto max-h-[600px] leading-relaxed">
-          <pre>{{ sw.raw_config || 'No running config synced yet. Click "Sync Switch" to retrieve it via SSH.' }}</pre>
+
+        <div
+          v-else
+          class="p-4 rounded-xl border border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 flex items-start gap-3"
+        >
+          <Icon icon="carbon:checkmark-filled" class="w-5 h-5 shrink-0 mt-0.5 text-emerald-500" />
+          <div class="text-xs space-y-1">
+            <div class="font-bold text-sm">gRPC Dial-Out Telemetry Active</div>
+            <p>
+              gRPC dial-out streaming is enabled. Port state, optical transceivers, and LLDP topology are pushed directly to Redis on port 50051. Periodic SSH metric scraping is disabled to reduce load on the switch.
+            </p>
+          </div>
+        </div>
+
+        <div class="border rounded-xl bg-card overflow-hidden shadow-xs">
+          <div class="p-4 border-b bg-muted/20 flex items-center justify-between">
+            <h3 class="font-semibold text-sm">Current Running Configuration</h3>
+            <span class="text-xs text-muted-foreground">Read-only live copy</span>
+          </div>
+          <div class="p-4 bg-zinc-950 text-zinc-300 font-mono text-xs overflow-x-auto max-h-[600px] leading-relaxed">
+            <pre>{{ sw.raw_config || 'No running config synced yet. Click "Sync Switch" to retrieve it via SSH.' }}</pre>
+          </div>
         </div>
       </div>
     </div>

@@ -555,7 +555,7 @@ export function parseTransceiverDDM(output, manuinfo = null) {
   return results;
 }
 
-function getOpticalHealth(rxPower) {
+export function getOpticalHealth(rxPower) {
   if (rxPower === null || isNaN(rxPower)) return 'unknown';
   if (rxPower < -20.0) return 'critical';
   if (rxPower < -15.0) return 'warning';

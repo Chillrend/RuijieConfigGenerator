@@ -11,10 +11,14 @@ import { Strategy as GoogleStrategy } from 'passport-google-oauth20';
 import jwt from 'jsonwebtoken';
 import cookieParser from 'cookie-parser';
 import dotenv from 'dotenv';
+import http from 'http';
+import { Server as SocketIOServer } from 'socket.io';
+import IORedis from 'ioredis';
 import { initDatabase, syncSwitchesFromDeployments } from './lib/db.js';
 import fleetRouter from './routes/fleet.js';
 import { initInflux } from './lib/influx.js';
-import { initQueue, startPeriodicPolling } from './lib/queue.js';
+import { initQueue, startPeriodicPolling, startDailyConfigBackup } from './lib/queue.js';
+import { getRedis } from './lib/redis.js';
 
 // --- ESM __dirname workaround ---
 const __filename = fileURLToPath(import.meta.url);
@@ -29,7 +33,8 @@ dotenv.config({ path: path.join(__dirname, '.env') });
 const db = await initDatabase();
 initInflux();
 await initQueue();
-startPeriodicPolling(5);
+startDailyConfigBackup();
+startPeriodicPolling(15);
 
 async function upsertFleetSwitch(payload, serialNumber, macAddress, hostname, modelId, mgmtIp, inventoryTag) {
   try {
@@ -75,7 +80,7 @@ const configTemplate = Handlebars.compile(templateSource);
 const app = express();
 // Configure CORS to allow credentials from the frontend
 app.use(cors({
-  origin: 'http://localhost:5173', // Vite default port
+  origin: true,
   credentials: true
 }));
 app.use(express.json());
@@ -603,9 +608,89 @@ app.post('/api/generate-config', requireAuth, async (req, res) => {
 });
 
 // ────────────────────────────────────────────────────────────
-// 4. Start Server
+// 4. Start Server & Real-time WebSockets
 // ────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => {
-  console.log(`✅ Backend running → http://localhost:${PORT}`);
+const httpServer = http.createServer(app);
+
+const io = new SocketIOServer(httpServer, {
+  cors: {
+    origin: '*',
+    methods: ['GET', 'POST'],
+    credentials: true
+  }
+});
+
+// Real-time Redis Pub/Sub relay to WebSockets
+const redisUrl = process.env.REDIS_URL || 'redis://localhost:6379';
+const redisSub = new IORedis(redisUrl, { maxRetriesPerRequest: null, retryStrategy: () => 2000 });
+const redisClient = getRedis();
+
+redisSub.subscribe('switch:telemetry:update', 'global-action:progress', (err) => {
+  if (!err) console.log('[Socket.IO] Subscribed to Redis channels switch:telemetry:update, global-action:progress');
+});
+
+redisSub.on('message', async (channel, message) => {
+  if (channel === 'global-action:progress') {
+    try {
+      const data = JSON.parse(message);
+      io.emit('global-action:progress', data);
+    } catch (e) {}
+    return;
+  }
+
+  if (channel === 'switch:telemetry:update') {
+    try {
+      const { ip } = JSON.parse(message);
+      if (ip) {
+        const raw = await redisClient.get(`sw:${ip}:telemetry`);
+        if (raw) {
+          const telemetry = JSON.parse(raw);
+          io.to(`switch:${ip}`).emit('telemetry:update', telemetry);
+
+          // Real-time fleet overview broadcast
+          const isPhysical = (name) => /^(?:MTGigabitEthernet|MTGi|GigabitEthernet|Gi|TenGigabitEthernet|Te|TFGigabitEthernet|TF|TwentyFiveGigabitEthernet|25G|FortyGigabitEthernet|Fo|HundredGigabitEthernet|Hu|FastEthernet|Fa|AggregatePort|Ag)\s*\d/i.test(name || '');
+          const phys = (telemetry.interfaces || []).filter(i => isPhysical(i.name) || isPhysical(i.shortName));
+          const activeCount = phys.filter(i => (i.operStatus || '').toLowerCase() === 'up').length;
+          const upCount = (telemetry.lldp || []).filter(l => l.isUplink).length;
+          const optWarn = (telemetry.optical || []).filter(o => o.status === 'warning' || o.status === 'critical').length;
+
+          io.emit('fleet:switch-update', {
+            ip,
+            status: 'online',
+            active_ports: activeCount,
+            total_ports: phys.length,
+            uplink_count: upCount,
+            optical_warnings: optWarn,
+            last_seen: telemetry.last_seen,
+            telemetry_mode: 'grpc'
+          });
+        }
+      }
+    } catch (e) {
+      // Non-blocking error
+    }
+  }
+});
+
+io.on('connection', (socket) => {
+  socket.on('join:switch', async (ip) => {
+    if (!ip) return;
+    socket.join(`switch:${ip}`);
+    // Immediately stream cached telemetry if available
+    try {
+      const raw = await redisClient.get(`sw:${ip}:telemetry`);
+      if (raw) {
+        socket.emit('telemetry:update', JSON.parse(raw));
+      }
+    } catch (e) {}
+  });
+
+  socket.on('leave:switch', (ip) => {
+    if (ip) socket.leave(`switch:${ip}`);
+  });
+});
+
+httpServer.listen(PORT, () => {
+  console.log(`✅ Backend and WebSocket server running → http://localhost:${PORT}`);
 });

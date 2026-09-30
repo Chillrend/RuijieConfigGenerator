@@ -4,6 +4,7 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: ruijie-config-generator
+    command: ["backend"]
     ports:
       - "3001:3001"
     volumes:
@@ -21,6 +22,39 @@ services:
       - INFLUX_TOKEN=ruijie-secret-fleet-token-12345
       - INFLUX_ORG=ruijie_fleet
       - INFLUX_BUCKET=switch_metrics
+      - GRPC_COLLECTOR_IP=${GRPC_COLLECTOR_IP:-10.23.9.10}
+      - GRPC_COLLECTOR_PORT=${GRPC_COLLECTOR_PORT:-50051}
+      - DISABLE_AUTH=${DISABLE_AUTH:-false}
+      - JWT_SECRET=${JWT_SECRET:-m5Qu7yONikydmI3hDDK4ZDE9}
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
+      - GOOGLE_CALLBACK_URL=${GOOGLE_CALLBACK_URL:-}
+      - ALLOWED_EMAILS=${ALLOWED_EMAILS:-}
+
+  ruijie-grpc-listener:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ruijie-grpc-listener
+    command: ["listener"]
+    ports:
+      - "50051:50051"
+    volumes:
+      - ./backend/data:/app/backend/data
+    restart: unless-stopped
+    depends_on:
+      - postgres
+      - redis
+      - influxdb
+    environment:
+      - GRPC_PORT=${GRPC_PORT:-50051}
+      - DATABASE_URL=postgresql://ruijie:ruijiepass@postgres:5432/ruijiedb
+      - REDIS_URL=redis://redis:6379
+      - INFLUX_URL=http://influxdb:8086
+      - INFLUX_TOKEN=ruijie-secret-fleet-token-12345
+      - INFLUX_ORG=ruijie_fleet
+      - INFLUX_BUCKET=switch_metrics
+      - GNMIC_PATH=/usr/local/bin/gnmic
 
   postgres:
     image: postgres:16-alpine
@@ -64,4 +98,3 @@ volumes:
   postgres_data:
   redis_data:
   influxdb_data:
-

@@ -3,12 +3,25 @@
 # Function to clean up background processes on exit
 cleanup() {
     echo "Stopping services..."
-    kill $BACKEND_PID $FRONTEND_PID 2>/dev/null
+    kill $BACKEND_PID $FRONTEND_PID $LISTENER_PID 2>/dev/null
     exit
 }
 
 # Set trap to call cleanup function on script exit (like Ctrl+C)
 trap cleanup SIGINT SIGTERM EXIT
+
+# Ensure gnmic binary is available for gNMI dial-in helper
+if [ ! -f backend/bin/gnmic ]; then
+    if [ -f /home/chillrend/gnmic ]; then
+        mkdir -p backend/bin
+        cp /home/chillrend/gnmic backend/bin/gnmic
+        chmod +x backend/bin/gnmic
+    elif command -v gnmic &> /dev/null; then
+        mkdir -p backend/bin
+        cp "$(which gnmic)" backend/bin/gnmic
+        chmod +x backend/bin/gnmic
+    fi
+fi
 
 # Spin up background dependencies (postgres, redis, influxdb) if docker is available
 if command -v docker &> /dev/null; then
@@ -36,11 +49,15 @@ echo "Starting backend..."
 npm run dev --prefix backend &
 BACKEND_PID=$!
 
+echo "Starting gRPC telemetry listener (port 50051)..."
+npm run listener --prefix backend &
+LISTENER_PID=$!
+
 echo "Starting frontend..."
 npm run dev --prefix frontend -- --host 0.0.0.0 &
 FRONTEND_PID=$!
 
-echo "Both services are running. Press Ctrl+C to stop."
+echo "All services (backend, gRPC listener, frontend) are running. Press Ctrl+C to stop."
 
 # Wait for background processes
 wait

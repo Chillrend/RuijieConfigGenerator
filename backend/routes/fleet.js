@@ -2,49 +2,98 @@ import express from 'express';
 import { getDB, syncSwitchesFromDeployments } from '../lib/db.js';
 import { pollSwitch } from '../lib/poller.js';
 import { enqueueSwitchPoll, enqueueAllSwitches } from '../lib/queue.js';
-import { generatePortDeltaCommands, normalizePortName } from '../lib/ruijie-parser.js';
+import { generatePortDeltaCommands, normalizePortName, shortPortName } from '../lib/ruijie-parser.js';
 import { runSshSession } from '../lib/ssh.js';
 import { getOpticalHistory } from '../lib/influx.js';
+import { getRedis } from '../lib/redis.js';
 
 const router = express.Router();
 
-// List all switches with high-level stats
+// Disable HTTP caching for all fleet API endpoints so browser always receives live data
+router.use((req, res, next) => {
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.set('Pragma', 'no-cache');
+  res.set('Expires', '0');
+  next();
+});
+
+// List all switches with high-level stats (augmented by Redis real-time telemetry if available)
 router.get('/', async (req, res) => {
   try {
     const db = getDB();
     const rows = await db.all('SELECT * FROM switches ORDER BY hostname ASC, mgmt_ip ASC');
+    const redis = getRedis();
 
-    const switches = rows.map((sw) => {
-      let ports = [];
-      let lldp = [];
-      let optical = [];
-      try { ports = sw.ports_json ? JSON.parse(sw.ports_json) : []; } catch (e) {}
-      try { lldp = sw.lldp_json ? JSON.parse(sw.lldp_json) : []; } catch (e) {}
-      try { optical = sw.optical_json ? JSON.parse(sw.optical_json) : []; } catch (e) {}
+    const switches = await Promise.all(
+      rows.map(async (sw) => {
+        let ports = [];
+        let lldp = [];
+        let optical = [];
+        try { ports = sw.ports_json ? JSON.parse(sw.ports_json) : []; } catch (e) {}
+        try { lldp = sw.lldp_json ? JSON.parse(sw.lldp_json) : []; } catch (e) {}
+        try { optical = sw.optical_json ? JSON.parse(sw.optical_json) : []; } catch (e) {}
 
-      const activePorts = ports.filter(p => p.operStatus === 'up').length;
-      const uplinkCount = lldp.filter(l => l.isUplink).length;
-      const opticalWarnings = optical.filter(o => o.status === 'warning' || o.status === 'critical').length;
+        // Check if real-time telemetry exists in Redis
+        let isLiveGrpc = false;
+        let lastLiveSeen = null;
+        let liveTelemetry = null;
+        try {
+          const liveRaw = await redis.get(`sw:${sw.mgmt_ip}:telemetry`);
+          if (liveRaw) {
+            liveTelemetry = JSON.parse(liveRaw);
+            isLiveGrpc = true;
+            lastLiveSeen = liveTelemetry.last_seen;
+            if (Array.isArray(liveTelemetry.optical) && liveTelemetry.optical.length > 0) {
+              optical = liveTelemetry.optical;
+            }
+            if (Array.isArray(liveTelemetry.lldp) && liveTelemetry.lldp.length > 0) {
+              lldp = liveTelemetry.lldp;
+            }
+          }
+        } catch (e) {}
 
-      return {
-        id: sw.id,
-        serial_number: sw.serial_number,
-        mac_address: sw.mac_address,
-        hostname: sw.hostname,
-        model_id: sw.model_id,
-        mgmt_ip: sw.mgmt_ip,
-        inventory_tag: sw.inventory_tag,
-        status: sw.status || 'unknown',
-        last_seen: sw.last_seen,
-        last_synced: sw.last_synced,
-        uptime: sw.uptime,
-        software_version: sw.software_version,
-        total_ports: ports.length,
-        active_ports: activePorts,
-        uplink_count: uplinkCount,
-        optical_warnings: opticalWarnings
-      };
-    });
+        const isPhysicalPort = (name) => /^(?:MTGigabitEthernet|MTGi|GigabitEthernet|Gi|TenGigabitEthernet|Te|TFGigabitEthernet|TF|TwentyFiveGigabitEthernet|25G|FortyGigabitEthernet|Fo|HundredGigabitEthernet|Hu|FastEthernet|Fa|AggregatePort|Ag)\s*\d/i.test(name || '');
+
+        let activePorts = 0;
+        let totalPorts = ports.length;
+
+        if (isLiveGrpc && Array.isArray(liveTelemetry?.interfaces) && liveTelemetry.interfaces.length > 0) {
+          const physicalInterfaces = liveTelemetry.interfaces.filter(i => isPhysicalPort(i.name) || isPhysicalPort(i.shortName));
+          activePorts = physicalInterfaces.filter(i => (i.operStatus || '').toLowerCase() === 'up').length;
+          totalPorts = ports.length > 0 ? ports.length : physicalInterfaces.length;
+        } else {
+          activePorts = ports.filter(p => (p.operStatus || '').toLowerCase() === 'up').length;
+        }
+
+        const uplinkCount = lldp.filter(l => l.isUplink).length;
+        const opticalWarnings = optical.filter(o => o.status === 'warning' || o.status === 'critical').length;
+
+        // Auto-check if gRPC was configured in running-config
+        const hasGrpcConfig = !!(sw.raw_config && /(?:^|\n)\s*grpc\b[\s\S]*?(?:destination-group|subscription)\b/i.test(sw.raw_config));
+
+        return {
+          id: sw.id,
+          serial_number: sw.serial_number,
+          mac_address: sw.mac_address,
+          hostname: sw.hostname,
+          model_id: sw.model_id,
+          mgmt_ip: sw.mgmt_ip,
+          inventory_tag: sw.inventory_tag,
+          status: isLiveGrpc ? 'online' : (sw.status || 'unknown'),
+          telemetry_mode: isLiveGrpc ? 'grpc' : (sw.telemetry_mode || 'ssh'),
+          is_live_grpc: isLiveGrpc,
+          grpc_configured: hasGrpcConfig,
+          last_seen: lastLiveSeen || sw.last_seen,
+          last_synced: sw.last_synced,
+          uptime: sw.uptime,
+          software_version: sw.software_version,
+          total_ports: totalPorts,
+          active_ports: activePorts,
+          uplink_count: uplinkCount,
+          optical_warnings: opticalWarnings
+        };
+      })
+    );
 
     res.json({ switches });
   } catch (err) {
@@ -161,6 +210,104 @@ router.get('/:id', async (req, res) => {
       }
     }
 
+    // 4. Check Redis for real-time telemetry (gRPC live cache)
+    const redis = getRedis();
+    let liveTelemetry = null;
+    try {
+      const rawRedis = await redis.get(`sw:${sw.mgmt_ip}:telemetry`);
+      if (rawRedis) liveTelemetry = JSON.parse(rawRedis);
+    } catch (e) {}
+
+    const telemetrySource = liveTelemetry ? 'grpc' : (sw.telemetry_mode || 'ssh');
+    const grpcConfigured = !!(sw.raw_config && /(?:^|\n)\s*grpc\b[\s\S]*?(?:destination-group|subscription)\b/i.test(sw.raw_config));
+
+    // If live telemetry from gRPC is available, overlay real-time states
+    if (liveTelemetry) {
+      if (Array.isArray(liveTelemetry.optical) && liveTelemetry.optical.length > 0) {
+        optical = liveTelemetry.optical;
+      }
+      if (Array.isArray(liveTelemetry.lldp) && liveTelemetry.lldp.length > 0) {
+        lldp = liveTelemetry.lldp;
+      }
+
+      const liveIfMap = new Map();
+      for (const iface of (liveTelemetry.interfaces || [])) {
+        liveIfMap.set(iface.name, iface);
+        liveIfMap.set(iface.shortName, iface);
+      }
+      const livePoeMap = new Map();
+      for (const p of (liveTelemetry.poe || [])) {
+        livePoeMap.set(p.port, p);
+        livePoeMap.set(p.portShort, p);
+      }
+      const liveOptMap = new Map();
+      for (const opt of optical) {
+        liveOptMap.set(opt.port, opt);
+        liveOptMap.set(opt.portShort, opt);
+      }
+      const liveLldpMap = new Map();
+      for (const l of lldp) {
+        liveLldpMap.set(l.localPort, l);
+        liveLldpMap.set(l.localPortShort, l);
+      }
+
+      // If ports is still empty, synthesize from live interfaces
+      if (ports.length === 0 && Array.isArray(liveTelemetry.interfaces) && liveTelemetry.interfaces.length > 0) {
+        ports = liveTelemetry.interfaces.map((iface, idx) => {
+          const match = iface.name.match(/\/(\d+)$/);
+          const portNum = match ? parseInt(match[1], 10) : idx + 1;
+          const isUplink = hwTemplate?.uplinkPorts?.includes(portNum) || /Te|TF|25G|40G|100G/i.test(iface.name);
+          return {
+            id: portNum,
+            name: iface.name,
+            shortName: iface.shortName,
+            description: iface.description || '',
+            mode: iface.mode || 'access',
+            vlan: iface.vlan || '1',
+            allowed_vlans: iface.allowed_vlans || 'all',
+            native_vlan: '',
+            poeMode: 'default',
+            poePriority: 'default',
+            poeMaxPower: '',
+            operStatus: iface.operStatus,
+            speed: iface.speed,
+            duplex: iface.duplex,
+            isUplink
+          };
+        });
+      }
+
+      // Overlay live status onto existing configured ports
+      for (const p of ports) {
+        const liveIf = liveIfMap.get(p.name) || liveIfMap.get(p.shortName);
+        if (liveIf) {
+          p.operStatus = liveIf.operStatus || p.operStatus;
+          p.speed = liveIf.speed || p.speed;
+          p.duplex = liveIf.duplex || p.duplex;
+          if (liveIf.counters) p.counters = liveIf.counters;
+        }
+
+        const livePoe = livePoeMap.get(p.name) || livePoeMap.get(p.shortName);
+        if (livePoe) {
+          p.poeStatus = livePoe.powerStatus || p.poeStatus || 'off';
+          p.poePower = livePoe.watt || 0;
+          p.poePowerStr = livePoe.currPower || `${livePoe.watt || 0}W`;
+        }
+
+        const liveOpt = liveOptMap.get(p.name) || liveOptMap.get(p.shortName);
+        if (liveOpt) {
+          p.optical = liveOpt;
+        }
+
+        const livePeer = liveLldpMap.get(p.name) || liveLldpMap.get(p.shortName);
+        if (livePeer) {
+          p.uplinkNeighbor = livePeer.remoteDevice;
+          p.uplinkNeighborPort = livePeer.remotePort;
+          p.isUplink = livePeer.isUplink || p.isUplink;
+        }
+      }
+    }
+
     // Attach numeric id for faceplate ordering if missing
     ports.forEach((p, idx) => {
       if (!p.id) {
@@ -182,7 +329,10 @@ router.get('/:id', async (req, res) => {
       ports,
       lldp,
       optical,
-      hardware_template: hwTemplate
+      hardware_template: hwTemplate,
+      telemetry_source: telemetrySource,
+      grpc_configured: grpcConfigured,
+      status: liveTelemetry ? 'online' : (sw.status || 'unknown')
     };
 
     res.json({ switch: sanitized });
@@ -343,6 +493,170 @@ router.delete('/:id', async (req, res) => {
     const db = getDB();
     await db.run('DELETE FROM switches WHERE id = ?', [req.params.id]);
     res.json({ success: true, message: 'Switch deleted from fleet' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Retrieve configured gRPC collector server info
+router.get('/global-config/grpc-info', (req, res) => {
+  res.json({
+    collectorIp: process.env.GRPC_COLLECTOR_IP || '10.23.9.10',
+    collectorPort: parseInt(process.env.GRPC_COLLECTOR_PORT || '50051', 10)
+  });
+});
+
+// Deploy gRPC telemetry dial-out configuration preset to switches
+router.post('/global-config/deploy-grpc', async (req, res) => {
+  const defaultIp = process.env.GRPC_COLLECTOR_IP || '10.23.9.10';
+  const defaultPort = parseInt(process.env.GRPC_COLLECTOR_PORT || '50051', 10);
+  const { switchIds, serverIp = defaultIp, serverPort = defaultPort } = req.body;
+  const redis = getRedis();
+  try {
+    const db = getDB();
+    let switches = [];
+    if (Array.isArray(switchIds) && switchIds.length > 0) {
+      const placeholders = switchIds.map(() => '?').join(',');
+      switches = await db.all(`SELECT * FROM switches WHERE id IN (${placeholders})`, switchIds);
+    } else {
+      switches = await db.all('SELECT * FROM switches');
+    }
+
+    console.log(`[Deploy gRPC] >>> Initiating gRPC dial-out deployment for ${switches.length} switches (collector: ${serverIp}:${serverPort})...`);
+
+    const grpcCommands = [
+      'configure terminal',
+      'grpc',
+      ' server port 50052',
+      ' rpc gnmi enable',
+      ' sensor-group FAST_METRICS',
+      '  sensor-path openconfig-interfaces:interfaces',
+      '  exit-sensor-group',
+      ' sensor-group SLOW_METRICS',
+      '  sensor-path openconfig-lldp:lldp',
+      '  sensor-path /openconfig-platform:components/component/transceiver',
+      '  exit-sensor-group',
+      ' destination-group FLEET_BACKEND',
+      `  ip ${serverIp} port ${serverPort}`,
+      '  exit-destination-group',
+      ' subscription FLEET_STREAM',
+      '  sensor-group FAST_METRICS sample-interval 5000',
+      '  sensor-group SLOW_METRICS sample-interval 60000',
+      '  destination-group FLEET_BACKEND',
+      '  exit-grpc-subscription',
+      'end',
+      'write'
+    ];
+
+    const results = [];
+    let completedCount = 0;
+
+    // Run in parallel batches of 4 for speed without overwhelming switch/network
+    const CONCURRENCY = 4;
+    for (let i = 0; i < switches.length; i += CONCURRENCY) {
+      const batch = switches.slice(i, i + CONCURRENCY);
+      await Promise.all(
+        batch.map(async (sw) => {
+          const swName = sw.hostname || sw.mgmt_ip;
+          if (/10GT/i.test(sw.model_id || '')) {
+            console.log(`[Deploy gRPC] Skipping ${swName} (${sw.mgmt_ip}) - 10GT does not support gRPC`);
+            results.push({
+              id: sw.id,
+              hostname: sw.hostname,
+              mgmt_ip: sw.mgmt_ip,
+              success: false,
+              error: 'Model does not support gRPC (10GT series)'
+            });
+            completedCount++;
+            return;
+          }
+
+          if (/11\.0/i.test(sw.software_version || '')) {
+            console.log(`[Deploy gRPC] Skipping ${swName} (${sw.mgmt_ip}) - RGOS 11.0 does not support OpenConfig telemetry`);
+            results.push({
+              id: sw.id,
+              hostname: sw.hostname,
+              mgmt_ip: sw.mgmt_ip,
+              success: false,
+              error: 'RGOS 11.0 lacks OpenConfig telemetry support (firmware upgrade to 12.x required)'
+            });
+            completedCount++;
+            return;
+          }
+
+          console.log(`[Deploy gRPC] [${completedCount + 1}/${switches.length}] Connecting via SSH to ${swName} (${sw.mgmt_ip})...`);
+          try {
+            await runSshSession(
+              sw.mgmt_ip,
+              {
+                username: sw.admin_username || 'admin',
+                password: sw.admin_password || '',
+                enablePassword: sw.enable_password || sw.admin_password || '',
+                timeout: 15000
+              },
+              grpcCommands
+            );
+
+            await db.run(
+              "UPDATE switches SET grpc_status = 'pending', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+              [sw.id]
+            );
+
+            console.log(`[Deploy gRPC] ✓ Successfully configured gRPC on ${swName} (${sw.mgmt_ip})`);
+            results.push({
+              id: sw.id,
+              hostname: sw.hostname,
+              mgmt_ip: sw.mgmt_ip,
+              success: true
+            });
+          } catch (err) {
+            console.warn(`[Deploy gRPC] ✗ Failed on ${swName} (${sw.mgmt_ip}): ${err.message}`);
+            results.push({
+              id: sw.id,
+              hostname: sw.hostname,
+              mgmt_ip: sw.mgmt_ip,
+              success: false,
+              error: err.message
+            });
+          } finally {
+            completedCount++;
+            try {
+              if (redis) {
+                await redis.publish('global-action:progress', JSON.stringify({
+                  action: 'deploy-grpc',
+                  completed: completedCount,
+                  total: switches.length,
+                  current: swName
+                }));
+              }
+            } catch (e) {}
+          }
+        })
+      );
+    }
+
+    const successful = results.filter(r => r.success).length;
+    const failed = results.filter(r => !r.success).length;
+    console.log(`[Deploy gRPC] >>> Finished deployment to ${switches.length} switches: ${successful} succeeded, ${failed} failed.`);
+
+    res.json({
+      success: true,
+      total: switches.length,
+      successful,
+      failed,
+      results
+    });
+  } catch (err) {
+    console.error('[Deploy gRPC] Global deployment error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Sync running-config for all switches (daily-style backup)
+router.post('/global-config/sync-config', async (req, res) => {
+  try {
+    const result = await enqueueAllSwitches(true);
+    res.json({ success: true, message: `Queued ${result.queued} switches for running-config sync.` });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

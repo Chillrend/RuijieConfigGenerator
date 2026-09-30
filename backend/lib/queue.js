@@ -85,21 +85,42 @@ export async function enqueueSwitchPoll(switchId) {
   return memoryQueue.add('poll-switch', { switchId });
 }
 
-export async function enqueueAllSwitches() {
+export async function enqueueAllSwitches(forceAll = false) {
   const db = getDB();
-  const switches = await db.all('SELECT id FROM switches');
+  const switches = await db.all('SELECT id, telemetry_mode FROM switches');
+  let queued = 0;
   for (const sw of switches) {
+    // If not forcing all, skip switches that are already streaming real-time via gRPC
+    if (!forceAll && sw.telemetry_mode === 'grpc') {
+      continue;
+    }
     await enqueueSwitchPoll(sw.id);
+    queued++;
   }
-  return { queued: switches.length };
+  return { queued };
 }
 
-export function startPeriodicPolling(intervalMinutes = 5) {
+let dailyIntervalId = null;
+
+export function startDailyConfigBackup() {
+  if (dailyIntervalId) clearInterval(dailyIntervalId);
+  console.log('Starting daily running-config sync for switch fleet (every 24 hours)');
+  dailyIntervalId = setInterval(async () => {
+    try {
+      console.log('[DailySync] Enqueueing daily running-config sync for all switches...');
+      await enqueueAllSwitches(true);
+    } catch (err) {
+      console.error('Daily config sync error:', err.message);
+    }
+  }, 24 * 60 * 60 * 1000);
+}
+
+export function startPeriodicPolling(intervalMinutes = 15) {
   if (periodicIntervalId) clearInterval(periodicIntervalId);
-  console.log(`Starting background switch fleet poller every ${intervalMinutes} minutes`);
+  console.log(`Starting background switch fleet poller for SSH switches every ${intervalMinutes} minutes`);
   periodicIntervalId = setInterval(async () => {
     try {
-      await enqueueAllSwitches();
+      await enqueueAllSwitches(false);
     } catch (err) {
       console.error('Periodic polling error:', err.message);
     }

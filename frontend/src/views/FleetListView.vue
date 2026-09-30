@@ -1,6 +1,7 @@
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
+import { io } from 'socket.io-client'
 import { Icon } from '@iconify/vue'
 import { Input } from '../components/ui/input'
 import { Button } from '../components/ui/button'
@@ -14,6 +15,126 @@ const syncingAll = ref(false)
 const syncingId = ref(null)
 const searchQuery = ref('')
 const errorMsg = ref('')
+
+// Sorting & Pagination State
+const sortKey = ref('ip') // 'ip' | 'hostname' | 'status' | 'ports' | 'optical'
+const sortOrder = ref('asc') // 'asc' | 'desc'
+const currentPage = ref(1)
+const pageSize = ref(15) // 15, 25, 50, 1000
+
+// Numerical IPv4 Converter (Ensures e.g. 10.90.0.235 is correctly sorted before 10.90.2.1)
+const ipToNumber = (ip) => {
+  if (!ip || typeof ip !== 'string') return 0
+  const parts = ip.trim().split('.')
+  if (parts.length !== 4) return 0
+  return ((parseInt(parts[0], 10) || 0) * 16777216) +
+         ((parseInt(parts[1], 10) || 0) * 65536) +
+         ((parseInt(parts[2], 10) || 0) * 256) +
+         ((parseInt(parts[3], 10) || 0))
+}
+
+const toggleSort = (key) => {
+  if (sortKey.value === key) {
+    sortOrder.value = sortOrder.value === 'asc' ? 'desc' : 'asc'
+  } else {
+    sortKey.value = key
+    sortOrder.value = 'asc'
+  }
+}
+
+// Global Config Modal State
+const globalModalOpen = ref(false)
+const globalRunning = ref(false)
+const globalStatus = ref('')
+const globalResults = ref(null)
+
+let socket = null
+
+const setupSocket = () => {
+  if (socket) socket.disconnect()
+  socket = io(window.location.origin, { transports: ['websocket', 'polling'] })
+
+  socket.on('global-action:progress', (data) => {
+    if (globalRunning.value && data.action === 'deploy-grpc') {
+      const pct = Math.round((data.completed / data.total) * 100)
+      globalStatus.value = `Deploying gRPC [${data.completed}/${data.total}] (${pct}%): ${data.current}...`
+    }
+  })
+
+  // Real-time live fleet overview updates
+  socket.on('fleet:switch-update', (update) => {
+    const sw = switches.value.find(s => s.mgmt_ip === update.ip)
+    if (sw) {
+      sw.status = update.status
+      sw.active_ports = update.active_ports
+      if (update.total_ports && (!sw.total_ports || sw.total_ports === '—')) {
+        sw.total_ports = update.total_ports
+      }
+      sw.uplink_count = update.uplink_count
+      sw.optical_warnings = update.optical_warnings
+      sw.last_seen = update.last_seen
+      sw.telemetry_mode = update.telemetry_mode
+      sw.is_live_grpc = true
+    }
+  })
+}
+
+const openGlobalModal = () => {
+  globalStatus.value = ''
+  globalResults.value = null
+  globalModalOpen.value = true
+}
+
+const deployGrpcGlobal = async () => {
+  if (!confirm('Deploy gRPC Telemetry configuration to all switches? This connects via SSH and configures switches to push telemetry directly to this server on port 50051.')) return
+  globalRunning.value = true
+  globalStatus.value = 'Connecting to switches via SSH and deploying gRPC telemetry configuration...'
+  globalResults.value = null
+
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), 60000)
+
+  try {
+    const res = await fetch('/api/fleet/global-config/deploy-grpc', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({}),
+      signal: controller.signal
+    })
+    clearTimeout(timeoutId)
+    const data = await res.json()
+    if (!res.ok) throw new Error(data.error || 'Failed to deploy gRPC configuration')
+    globalResults.value = data
+    globalStatus.value = `Completed: ${data.successful} switches configured successfully, ${data.failed} failed.`
+    await fetchFleet()
+  } catch (err) {
+    globalStatus.value = `Error: ${err.name === 'AbortError' ? 'Deployment timed out after 60s' : err.message}`
+  } finally {
+    clearTimeout(timeoutId)
+    globalRunning.value = false
+  }
+}
+
+const syncConfigGlobal = async () => {
+  globalRunning.value = true
+  globalStatus.value = 'Queueing running-config sync for all switches...'
+  globalResults.value = null
+  try {
+    const res = await fetch('/api/fleet/global-config/sync-config', {
+      method: 'POST',
+      credentials: 'include'
+    })
+    const data = await res.json()
+    if (!res.ok) throw new Error(data.error || 'Failed to trigger config sync')
+    globalStatus.value = data.message || 'Config sync enqueued.'
+    setTimeout(fetchFleet, 2000)
+  } catch (err) {
+    globalStatus.value = `Error: ${err.message}`
+  } finally {
+    globalRunning.value = false
+  }
+}
 
 // Add Switch Modal State
 const addModalOpen = ref(false)
@@ -156,6 +277,45 @@ const filteredSwitches = computed(() => {
   )
 })
 
+const sortedSwitches = computed(() => {
+  const list = [...filteredSwitches.value]
+  const order = sortOrder.value === 'asc' ? 1 : -1
+
+  return list.sort((a, b) => {
+    if (sortKey.value === 'ip') {
+      return (ipToNumber(a.mgmt_ip) - ipToNumber(b.mgmt_ip)) * order
+    }
+    if (sortKey.value === 'hostname') {
+      return (a.hostname || '').localeCompare(b.hostname || '') * order
+    }
+    if (sortKey.value === 'status') {
+      return (a.status || '').localeCompare(b.status || '') * order
+    }
+    if (sortKey.value === 'ports') {
+      return ((a.active_ports || 0) - (b.active_ports || 0)) * order
+    }
+    if (sortKey.value === 'optical') {
+      return ((a.optical_warnings || 0) - (b.optical_warnings || 0)) * order
+    }
+    return 0
+  })
+})
+
+const totalPages = computed(() => {
+  if (pageSize.value >= 1000) return 1
+  return Math.ceil(sortedSwitches.value.length / pageSize.value) || 1
+})
+
+const paginatedSwitches = computed(() => {
+  if (pageSize.value >= 1000) return sortedSwitches.value
+  const start = (currentPage.value - 1) * pageSize.value
+  return sortedSwitches.value.slice(start, start + pageSize.value)
+})
+
+watch(searchQuery, () => {
+  currentPage.value = 1
+})
+
 const stats = computed(() => {
   const total = switches.value.length
   const online = switches.value.filter(s => s.status === 'online').length
@@ -164,8 +324,27 @@ const stats = computed(() => {
   return { total, online, offline, opticalIssues }
 })
 
+let pollTimer = null
+
+const fetchFleetSilent = async () => {
+  try {
+    const res = await fetch('/api/fleet', { credentials: 'include' })
+    if (res.ok) {
+      const data = await res.json()
+      switches.value = data.switches || []
+    }
+  } catch (e) {}
+}
+
 onMounted(() => {
   fetchFleet()
+  setupSocket()
+  pollTimer = setInterval(fetchFleetSilent, 8000)
+})
+
+onUnmounted(() => {
+  if (socket) socket.disconnect()
+  if (pollTimer) clearInterval(pollTimer)
 })
 </script>
 
@@ -184,6 +363,10 @@ onMounted(() => {
       </div>
 
       <div class="flex items-center gap-2.5">
+        <Button variant="secondary" size="sm" @click="openGlobalModal">
+          <Icon icon="carbon:settings" class="w-4 h-4 mr-1.5" />
+          Global Config
+        </Button>
         <Button size="sm" @click="openAddModal">
           <Icon icon="lucide:plus" class="w-4 h-4 mr-1.5" />
           Add Switch
@@ -274,40 +457,94 @@ onMounted(() => {
       </div>
 
       <div v-else class="overflow-x-auto">
-        <table class="w-full text-left border-collapse text-sm">
+        <table class="w-full text-left border-collapse text-xs">
           <thead>
-            <tr class="border-b bg-muted/40 text-xs font-semibold text-muted-foreground uppercase tracking-wider">
-              <th class="py-3 px-4">Status</th>
-              <th class="py-3 px-4">Switch Hostname</th>
-              <th class="py-3 px-4">Management IP</th>
-              <th class="py-3 px-4">Model & Firmware</th>
-              <th class="py-3 px-4 text-center">Active Ports</th>
-              <th class="py-3 px-4 text-center">Uplinks</th>
-              <th class="py-3 px-4 text-center">Optical DDM</th>
-              <th class="py-3 px-4">Last Seen</th>
-              <th class="py-3 px-4 text-right">Actions</th>
+            <tr class="border-b bg-muted/40 text-[11px] font-semibold text-muted-foreground uppercase tracking-wider select-none">
+              <!-- Sortable Status -->
+              <th class="py-2.5 px-3 cursor-pointer hover:text-foreground transition-colors" @click="toggleSort('status')">
+                <div class="flex items-center gap-1">
+                  <span>Status & Sync</span>
+                  <Icon
+                    v-if="sortKey === 'status'"
+                    :icon="sortOrder === 'asc' ? 'lucide:arrow-up' : 'lucide:arrow-down'"
+                    class="w-3 h-3 text-primary"
+                  />
+                </div>
+              </th>
+
+              <!-- Sortable Hostname -->
+              <th class="py-2.5 px-3 cursor-pointer hover:text-foreground transition-colors" @click="toggleSort('hostname')">
+                <div class="flex items-center gap-1">
+                  <span>Switch Hostname</span>
+                  <Icon
+                    v-if="sortKey === 'hostname'"
+                    :icon="sortOrder === 'asc' ? 'lucide:arrow-up' : 'lucide:arrow-down'"
+                    class="w-3 h-3 text-primary"
+                  />
+                </div>
+              </th>
+
+              <!-- Sortable IP -->
+              <th class="py-2.5 px-3 cursor-pointer hover:text-foreground transition-colors" @click="toggleSort('ip')">
+                <div class="flex items-center gap-1">
+                  <span>Management IP</span>
+                  <Icon
+                    v-if="sortKey === 'ip'"
+                    :icon="sortOrder === 'asc' ? 'lucide:arrow-up' : 'lucide:arrow-down'"
+                    class="w-3 h-3 text-primary"
+                  />
+                </div>
+              </th>
+
+              <th class="py-2.5 px-3">Model & Firmware</th>
+
+              <!-- Sortable Ports -->
+              <th class="py-2.5 px-3 cursor-pointer hover:text-foreground transition-colors" @click="toggleSort('ports')">
+                <div class="flex items-center gap-1">
+                  <span>Interfaces</span>
+                  <Icon
+                    v-if="sortKey === 'ports'"
+                    :icon="sortOrder === 'asc' ? 'lucide:arrow-up' : 'lucide:arrow-down'"
+                    class="w-3 h-3 text-primary"
+                  />
+                </div>
+              </th>
+
+              <!-- Sortable Optical / Telemetry -->
+              <th class="py-2.5 px-3 cursor-pointer hover:text-foreground transition-colors" @click="toggleSort('optical')">
+                <div class="flex items-center gap-1">
+                  <span>Telemetry & Optics</span>
+                  <Icon
+                    v-if="sortKey === 'optical'"
+                    :icon="sortOrder === 'asc' ? 'lucide:arrow-up' : 'lucide:arrow-down'"
+                    class="w-3 h-3 text-primary"
+                  />
+                </div>
+              </th>
+
+              <th class="py-2.5 px-3 text-right">Actions</th>
             </tr>
           </thead>
           <tbody class="divide-y">
             <tr
-              v-for="sw in filteredSwitches"
+              v-for="sw in paginatedSwitches"
               :key="sw.id"
               class="hover:bg-muted/30 transition-colors cursor-pointer group"
               @click="router.push(`/fleet/${sw.id}`)"
             >
-              <!-- Online/Offline Status -->
-              <td class="py-3 px-4">
-                <div class="flex items-center gap-2">
+              <!-- Online/Offline Status & Last Seen (Combined) -->
+              <td class="py-2 px-3">
+                <div class="flex items-center gap-1.5">
                   <span
-                    class="w-2.5 h-2.5 rounded-full"
+                    class="w-2 h-2 rounded-full shrink-0"
                     :class="{
-                      'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.7)]': sw.status === 'online',
+                      'bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.7)]': sw.status === 'online',
                       'bg-rose-500': sw.status === 'offline',
                       'bg-amber-400': sw.status === 'error',
                       'bg-zinc-400': sw.status === 'unknown'
                     }"
                   />
-                  <span class="text-xs font-medium capitalize" :class="{
+                  <span class="text-xs font-semibold capitalize leading-none" :class="{
                     'text-emerald-600': sw.status === 'online',
                     'text-rose-600': sw.status === 'offline',
                     'text-muted-foreground': sw.status === 'unknown'
@@ -315,90 +552,101 @@ onMounted(() => {
                     {{ sw.status }}
                   </span>
                 </div>
+                <div class="text-[10px] text-muted-foreground mt-0.5 pl-3.5 whitespace-nowrap">
+                  {{ sw.last_seen ? new Date(sw.last_seen).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : 'Never' }}
+                </div>
               </td>
 
-              <!-- Hostname & Tag -->
-              <td class="py-3 px-4">
-                <div class="font-semibold text-foreground group-hover:text-primary transition-colors flex items-center gap-1.5">
+              <!-- Hostname & Inventory Tag -->
+              <td class="py-2 px-3">
+                <div class="font-semibold text-xs text-foreground group-hover:text-primary transition-colors">
                   {{ sw.hostname || 'Unnamed Switch' }}
                 </div>
-                <div class="text-xs text-muted-foreground flex items-center gap-1.5 font-mono">
-                  <span>{{ sw.inventory_tag || 'NO-TAG' }}</span>
-                  <span>•</span>
-                  <span>SN: {{ sw.serial_number || '-' }}</span>
+                <div class="text-[10px] text-muted-foreground font-mono truncate max-w-[150px]">
+                  {{ sw.inventory_tag || 'NO-TAG' }}<span v-if="sw.serial_number"> • {{ sw.serial_number }}</span>
                 </div>
               </td>
 
-              <!-- IP -->
-              <td class="py-3 px-4">
-                <span class="font-mono text-xs font-medium px-2 py-0.5 rounded bg-muted">
-                  {{ sw.mgmt_ip || '-' }}
-                </span>
+              <!-- Management IP -->
+              <td class="py-2 px-3 font-mono font-bold text-xs whitespace-nowrap text-foreground">
+                {{ sw.mgmt_ip || '-' }}
               </td>
 
-              <!-- Model -->
-              <td class="py-3 px-4">
+              <!-- Model & Firmware -->
+              <td class="py-2 px-3">
                 <div class="text-xs font-medium">{{ sw.model_id || 'Ruijie Switch' }}</div>
-                <div class="text-[11px] text-muted-foreground truncate max-w-[150px]">
-                  {{ sw.software_version || 'RGOS' }}
+                <div class="text-[10px] text-muted-foreground truncate max-w-[130px]" :title="sw.software_version || ''">
+                  {{ sw.software_version ? sw.software_version.replace(/RGOS\s*/i, '') : 'RGOS' }}
                 </div>
               </td>
 
-              <!-- Ports -->
-              <td class="py-3 px-4 text-center">
-                <Badge variant="outline" class="font-mono text-xs">
-                  {{ sw.active_ports }} / {{ sw.total_ports || '—' }}
-                </Badge>
-              </td>
-
-              <!-- Uplinks -->
-              <td class="py-3 px-4 text-center">
-                <div v-if="sw.uplink_count > 0" class="inline-flex items-center gap-1 text-xs font-semibold text-blue-600 bg-blue-500/10 px-2 py-0.5 rounded-full">
-                  <Icon icon="ph:arrow-fat-up-fill" class="w-3.5 h-3.5" />
-                  <span>{{ sw.uplink_count }} Uplink</span>
-                </div>
-                <span v-else class="text-xs text-muted-foreground">—</span>
-              </td>
-
-              <!-- Optical -->
-              <td class="py-3 px-4 text-center">
-                <div v-if="sw.optical_warnings > 0" class="inline-flex items-center gap-1 text-xs font-medium text-amber-600 bg-amber-500/10 px-2 py-0.5 rounded-full">
-                  <Icon icon="carbon:warning-filled" class="w-3.5 h-3.5" />
-                  <span>Warning</span>
-                </div>
-                <div v-else class="inline-flex items-center gap-1 text-xs text-muted-foreground">
-                  <Icon icon="carbon:circle-dash" class="w-3.5 h-3.5 text-emerald-500" />
-                  <span>Normal</span>
+              <!-- Interfaces & Uplinks (Combined) -->
+              <td class="py-2 px-3 whitespace-nowrap">
+                <div class="flex items-center gap-1.5">
+                  <span class="font-mono text-xs font-medium">
+                    <span :class="sw.active_ports > 0 ? 'text-emerald-600 font-bold' : 'text-zinc-500'">{{ sw.active_ports }}</span>/{{ sw.total_ports || '—' }} Up
+                  </span>
+                  <span v-if="sw.uplink_count > 0" class="inline-flex items-center gap-0.5 text-[10px] font-bold text-blue-600 bg-blue-500/10 px-1.5 py-0.2 rounded" title="Inter-switch uplinks detected">
+                    <Icon icon="ph:arrow-fat-up-fill" class="w-2.5 h-2.5" />
+                    {{ sw.uplink_count }}
+                  </span>
                 </div>
               </td>
 
-              <!-- Last Seen -->
-              <td class="py-3 px-4 text-xs text-muted-foreground">
-                <div v-if="sw.last_seen">{{ new Date(sw.last_seen).toLocaleTimeString() }}</div>
-                <div v-else class="italic">Never synced</div>
+              <!-- Diagnostics & Telemetry (Combined) -->
+              <td class="py-2 px-3 whitespace-nowrap">
+                <div class="flex items-center gap-1.5 flex-wrap">
+                  <!-- Telemetry Mode Badge -->
+                  <span
+                    v-if="sw.telemetry_mode === 'grpc' || sw.is_live_grpc"
+                    class="inline-flex items-center gap-0.5 text-[10px] font-bold text-emerald-600 bg-emerald-500/10 border border-emerald-500/20 px-1.5 py-0.2 rounded-full"
+                    title="Real-time telemetry streamed via gRPC dial-out to Redis"
+                  >
+                    <Icon icon="carbon:flash" class="w-2.5 h-2.5 text-emerald-600" />
+                    gRPC
+                  </span>
+                  <span
+                    v-else
+                    class="inline-flex items-center gap-0.5 text-[10px] font-medium text-zinc-500 bg-zinc-500/10 border border-zinc-500/20 px-1.5 py-0.2 rounded-full"
+                    title="Telemetry scraped periodically via SSH fallback"
+                  >
+                    <Icon icon="carbon:terminal" class="w-2.5 h-2.5" />
+                    SSH
+                  </span>
+
+                  <!-- Optical indicator -->
+                  <span v-if="sw.optical_warnings > 0" class="inline-flex items-center gap-0.5 text-[10px] font-bold text-amber-600 bg-amber-500/10 px-1.5 py-0.2 rounded">
+                    <Icon icon="carbon:warning-filled" class="w-2.5 h-2.5" />
+                    Optic Warn
+                  </span>
+                  <span v-else class="text-[10px] text-muted-foreground flex items-center gap-0.5" title="Optics Normal">
+                    <Icon icon="carbon:checkmark" class="w-2.5 h-2.5 text-emerald-500" />
+                    Optics OK
+                  </span>
+                </div>
               </td>
 
               <!-- Action Buttons -->
-              <td class="py-3 px-4 text-right" @click.stop>
-                <div class="flex items-center justify-end gap-1.5">
+              <td class="py-2 px-3 text-right whitespace-nowrap" @click.stop>
+                <div class="flex items-center justify-end gap-1">
                   <Button
                     variant="ghost"
                     size="icon"
-                    class="h-8 w-8 text-muted-foreground hover:text-foreground"
+                    class="h-7 w-7 text-muted-foreground hover:text-foreground"
                     title="Poll switch via SSH"
                     :disabled="syncingId === sw.id"
                     @click="syncSwitch(sw.id, $event)"
                   >
                     <Icon
                       icon="lucide:refresh-cw"
-                      class="w-4 h-4"
+                      class="w-3.5 h-3.5"
                       :class="syncingId === sw.id ? 'animate-spin text-primary' : ''"
                     />
                   </Button>
                   <Button
                     variant="outline"
                     size="sm"
-                    class="h-8 text-xs font-medium"
+                    class="h-7 text-xs font-medium px-2.5"
                     @click="router.push(`/fleet/${sw.id}`)"
                   >
                     Manage
@@ -408,6 +656,56 @@ onMounted(() => {
             </tr>
           </tbody>
         </table>
+
+        <!-- Pagination Bar -->
+        <div v-if="filteredSwitches.length > 0" class="p-3 border-t bg-muted/20 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-muted-foreground select-none">
+          <div class="flex items-center gap-2">
+            <span>Showing</span>
+            <span class="font-semibold text-foreground">
+              {{ (currentPage - 1) * (pageSize >= 1000 ? filteredSwitches.length : pageSize) + 1 }}–{{ Math.min(currentPage * pageSize, sortedSwitches.length) }}
+            </span>
+            <span>of</span>
+            <span class="font-semibold text-foreground">{{ sortedSwitches.length }} switches</span>
+            <span class="mx-1">•</span>
+            <span>Page size:</span>
+            <select
+              v-model="pageSize"
+              @change="currentPage = 1"
+              class="border rounded px-2 py-0.5 text-xs bg-background text-foreground"
+            >
+              <option :value="15">15 per page</option>
+              <option :value="25">25 per page</option>
+              <option :value="50">50 per page</option>
+              <option :value="1000">Show All</option>
+            </select>
+          </div>
+
+          <div v-if="totalPages > 1" class="flex items-center gap-1.5">
+            <Button
+              variant="outline"
+              size="sm"
+              class="h-7 px-2.5 text-xs"
+              :disabled="currentPage === 1"
+              @click="currentPage--"
+            >
+              <Icon icon="lucide:chevron-left" class="w-3.5 h-3.5 mr-1" />
+              Previous
+            </Button>
+            <span class="px-2 font-medium text-foreground">
+              Page {{ currentPage }} of {{ totalPages }}
+            </span>
+            <Button
+              variant="outline"
+              size="sm"
+              class="h-7 px-2.5 text-xs"
+              :disabled="currentPage >= totalPages"
+              @click="currentPage++"
+            >
+              Next
+              <Icon icon="lucide:chevron-right" class="w-3.5 h-3.5 ml-1" />
+            </Button>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -525,6 +823,122 @@ onMounted(() => {
           <Button size="sm" @click="submitAddSwitch" :disabled="addSaving">
             <Icon icon="lucide:plus" class="w-4 h-4 mr-1.5" :class="addSaving ? 'animate-spin' : ''" />
             {{ addSaving ? 'Connecting...' : 'Add Switch' }}
+          </Button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Global Fleet Configuration Modal -->
+    <div
+      v-if="globalModalOpen"
+      class="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4"
+    >
+      <div class="bg-card text-card-foreground border rounded-2xl w-full max-w-lg shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+        <!-- Modal Header -->
+        <div class="p-5 border-b flex items-center justify-between bg-muted/30">
+          <div>
+            <h3 class="text-base font-bold flex items-center gap-2">
+              <Icon icon="carbon:settings" class="w-5 h-5 text-primary" />
+              Global Fleet Configuration
+            </h3>
+            <p class="text-xs text-muted-foreground mt-0.5">
+              Execute standardized configuration presets and fleet-wide management actions.
+            </p>
+          </div>
+          <button @click="globalModalOpen = false" class="text-muted-foreground hover:text-foreground">
+            <Icon icon="lucide:x" class="w-5 h-5" />
+          </button>
+        </div>
+
+        <!-- Modal Body -->
+        <div class="p-5 space-y-4 max-h-[75vh] overflow-y-auto text-sm">
+          <div v-if="globalStatus" class="p-3 bg-primary/10 border border-primary/20 text-xs rounded-lg flex items-center gap-2 font-medium">
+            <Icon icon="lucide:info" class="w-4 h-4 text-primary shrink-0" />
+            <span>{{ globalStatus }}</span>
+          </div>
+
+          <!-- Action 1: Deploy gRPC -->
+          <div class="p-4 rounded-xl border bg-muted/20 space-y-2">
+            <div class="flex items-center justify-between">
+              <div class="font-semibold text-sm flex items-center gap-2">
+                <Icon icon="carbon:flash" class="w-4 h-4 text-emerald-500" />
+                Enable gRPC Telemetry on All Switches
+              </div>
+              <Button size="sm" class="bg-emerald-600 hover:bg-emerald-700 h-8 text-xs" :disabled="globalRunning" @click="deployGrpcGlobal">
+                <Icon icon="lucide:play" class="w-3.5 h-3.5 mr-1" />
+                Deploy Preset
+              </Button>
+            </div>
+            <p class="text-xs text-muted-foreground leading-relaxed">
+              Injects gRPC dial-out streaming to the configured collector server on all eligible switches. Replaces heavy SSH scraping with real-time streaming to Redis. (Skips incompatible models like 10GT and RGOS 11.0).
+            </p>
+          </div>
+
+          <!-- Action 2: Daily Running Config Backup -->
+          <div class="p-4 rounded-xl border bg-muted/20 space-y-2">
+            <div class="flex items-center justify-between">
+              <div class="font-semibold text-sm flex items-center gap-2">
+                <Icon icon="carbon:document" class="w-4 h-4 text-blue-500" />
+                Backup Running Configuration (All)
+              </div>
+              <Button size="sm" variant="outline" class="h-8 text-xs" :disabled="globalRunning" @click="syncConfigGlobal">
+                <Icon icon="lucide:download-cloud" class="w-3.5 h-3.5 mr-1" />
+                Sync Configs
+              </Button>
+            </div>
+            <p class="text-xs text-muted-foreground leading-relaxed">
+              Fetches <code>show running-config</code> from all switches and updates the local database state without running full interface metrics commands.
+            </p>
+          </div>
+
+          <!-- Action 3: SSH Fallback Poll -->
+          <div class="p-4 rounded-xl border bg-muted/20 space-y-2">
+            <div class="flex items-center justify-between">
+              <div class="font-semibold text-sm flex items-center gap-2">
+                <Icon icon="carbon:terminal" class="w-4 h-4 text-amber-500" />
+                Force SSH Full Polling
+              </div>
+              <Button size="sm" variant="outline" class="h-8 text-xs border-amber-500/30 text-amber-600 dark:text-amber-400" :disabled="globalRunning || syncingAll" @click="syncAll">
+                <Icon icon="lucide:refresh-cw" class="w-3.5 h-3.5 mr-1" :class="syncingAll ? 'animate-spin' : ''" />
+                Poll All
+              </Button>
+            </div>
+            <p class="text-xs text-muted-foreground leading-relaxed">
+              Performs an immediate, full legacy SSH scrape across all devices (commands: <code>show interfaces status</code>, <code>show transceiver</code>, etc.).
+            </p>
+          </div>
+
+          <!-- Execution summary table if available -->
+          <div v-if="globalResults && globalResults.results" class="pt-2">
+            <h4 class="text-xs font-bold text-muted-foreground uppercase tracking-wider mb-2">Execution Results</h4>
+            <div class="border rounded-lg overflow-hidden text-xs">
+              <table class="w-full text-left">
+                <thead class="bg-muted/40 font-semibold border-b">
+                  <tr>
+                    <th class="p-2">Switch</th>
+                    <th class="p-2">IP</th>
+                    <th class="p-2 text-right">Result</th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y">
+                  <tr v-for="r in globalResults.results" :key="r.id">
+                    <td class="p-2 font-medium">{{ r.hostname || 'Switch #' + r.id }}</td>
+                    <td class="p-2 font-mono text-muted-foreground">{{ r.mgmt_ip }}</td>
+                    <td class="p-2 text-right">
+                      <span v-if="r.success" class="text-emerald-600 font-semibold">Success</span>
+                      <span v-else class="text-rose-600" :title="r.error">Failed: {{ r.error }}</span>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <!-- Modal Footer -->
+        <div class="p-4 border-t flex items-center justify-end gap-2 bg-muted/30">
+          <Button variant="outline" size="sm" @click="globalModalOpen = false" :disabled="globalRunning">
+            Close
           </Button>
         </div>
       </div>

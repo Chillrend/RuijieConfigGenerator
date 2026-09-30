@@ -1,107 +1,223 @@
-# Visual Switch Provisioner (Ruijie/Cisco)
+# Ruijie Switch Config Generator & Enterprise Fleet Manager
 
-A lightweight web application for generating Ruijie network switch CLI configurations through a beautiful, interactive visual interface.
+An enterprise-grade network automation, configuration generator, and real-time telemetry fleet management platform designed specifically for Ruijie Networks hardware running RGOS (11.x and 12.x).
 
-## ✨ Features
+---
 
-- **Interactive Switch Face**: Visually select and configure 1G/10G/40G/100G access and trunk ports.
-- **Bulk Operations**: Apply configurations (VLANs, Modes, Descriptions) to multiple ports at once.
-- **Dynamic Templates**: Generates ready-to-paste CLI syntax via Handlebars templating.
-- **Data Persistence**: Backed by a local **SQLite** database to track deployment history and maintain hardware definitions.
-- **Strict Provisioning Workflow**: Enforces capturing Serial Number (S/N) and MAC address before allowing configuration.
-- **Mobile Barcode Scanner PWA**: Pair your phone via QR code to instantly scan Code 128 barcodes from switch boxes directly into your laptop session via WebSockets.
-- **Deployment History & Reprinting**: View past configurations, raw CLI outputs, and easily reprint configuration summaries.
-- **Print-Ready Summary**: Export a clean, printable overview containing separated standard/uplink configurations and rendered S/N, MAC, and DataMatrix Inventory Tag barcodes.
+## ⚡ Key Highlights
 
-## 🚀 Quick Start
+- **Dual-Mode Telemetry (gRPC Dial-Out + SSH Fallback)**:
+  - **Modern RGOS (12.x)**: Switches dial out directly over HTTP/2 gRPC (`/gnmi.sonic.gNMIDialOut/Publish`) pushing OpenConfig interface status, link state, and optical transceiver DDM metrics every 5 seconds.
+  - **Legacy RGOS (11.x) / Incompatible Hardware**: Automatically falls back to isolated SSH polling commands without manual intervention or configuration drift.
+- **High-Performance Architecture**:
+  - **In-Memory Caching (Redis)**: Sub-millisecond port status and interface caching (`SET sw:{ip}:telemetry EX 3600`) eliminating switch polling CPU overhead.
+  - **Time-Series Storage (InfluxDB v2)**: Real-time optical diagnostic monitoring (Tx/Rx dBm, temperature, voltage, bias current) with batch writes.
+  - **Relational Persistence (PostgreSQL / SQLite)**: Device inventory, credentials, configuration history, and topology mappings.
+  - **Push Updates (Socket.IO)**: Live WebSocket updates stream interface changes, optical telemetry, and fleet health directly into the UI without page refreshes.
+- **Visual Switch Provisioner**:
+  - Interactive front-panel visualizer (1G / 2.5G / 10G / 25G / 40G / 100G ports).
+  - Drag-and-drop batch configuration (VLAN assignment, switchport mode, storm control, port descriptions).
+  - Code 128 & DataMatrix barcode scanning integration for fast inventory onboarding.
+- **Fleet Orchestration & Backup**:
+  - One-click global gRPC dial-out preset deployment across hundreds of switches.
+  - Automated daily running-config backups (`show running-config`) with revision tracking.
+
+---
+
+## 🏗️ Architecture
+
+```
+                                  ┌───────────────────────────────┐
+                                  │      Ruijie Switch Fleet      │
+                                  └───────┬───────────────┬───────┘
+                                          │               │
+        gRPC Dial-Out (OpenConfig, :50051)│               │ SSH Polling Fallback (:22)
+                                          ▼               ▼
+                       ┌──────────────────────┐   ┌──────────────────────┐
+                       │  grpc-listener.js    │   │      poller.js       │
+                       │ (HTTP/2 Dial-Out)    │   │ (SSH Engine / Queue) │
+                       └──────────┬───────────┘   └──────────┬───────────┘
+                                  │                          │
+                                  ├───────────┐  ┌───────────┤
+                                  ▼           ▼  ▼           ▼
+                           ┌─────────────┐  ┌─────────────┐  ┌──────────────┐
+                           │    Redis    │  │ PostgreSQL  │  │  InfluxDB v2  │
+                           │(Live State) │  │ (Inventory) │  │ (Time Series)│
+                           └──────┬──────┘  └──────┬──────┘  └──────────────┘
+                                  │                │
+                                  └───────┬────────┘
+                                          ▼
+                               ┌─────────────────────┐
+                               │   Express API &     │
+                               │   Socket.IO Server  │
+                               └──────────┬──────────┘
+                                          │
+                                          ▼
+                               ┌─────────────────────┐
+                               │  Vue 3 + Tailwind   │
+                               │  Single-Page App    │
+                               └─────────────────────┘
+```
+
+---
+
+## 🚀 Production Deployment (Docker Compose)
+
+The easiest and most reliable way to run the entire stack in production is using Docker Compose.
+
+### 1. Clone & Configure Environment
+
+```bash
+git clone https://github.com/chillrend/RuijieConfigGenerator.git
+cd RuijieConfigGenerator
+
+# Create your production environment file
+cp .env.example .env
+```
+
+Edit `.env` to match your network environment:
+
+```ini
+# Web & Backend API
+PORT=3001
+JWT_SECRET=generate_a_secure_random_string_here
+DISABLE_AUTH=false
+
+# Google OAuth (Optional: Set DISABLE_AUTH=true to bypass during internal staging)
+GOOGLE_CLIENT_ID=your_client_id.apps.googleusercontent.com
+GOOGLE_CLIENT_SECRET=your_client_secret
+GOOGLE_CALLBACK_URL=https://switch.yourdomain.com/api/auth/google/callback
+ALLOWED_EMAILS=admin@yourdomain.com,ops@yourdomain.com
+
+# PostgreSQL Database
+DATABASE_URL=postgresql://ruijie:ruijiepass@postgres:5432/ruijiedb
+
+# Redis & InfluxDB
+REDIS_URL=redis://redis:6379
+INFLUX_URL=http://influxdb:8086
+INFLUX_TOKEN=ruijie-secret-fleet-token-12345
+INFLUX_ORG=ruijie_fleet
+INFLUX_BUCKET=switch_metrics
+
+# gRPC Telemetry Collector
+# NOTE: GRPC_COLLECTOR_IP MUST be the server IP that switches can route to
+GRPC_COLLECTOR_IP=10.23.9.10
+GRPC_COLLECTOR_PORT=50051
+GRPC_PORT=50051
+```
+
+### 2. Launch Services
+
+```bash
+docker compose up -d --build
+```
+
+This starts:
+- `ruijie-config-generator`: Production API & built Vue frontend (`http://your-server:3001`).
+- `ruijie-grpc-listener`: Standalone HTTP/2 gRPC dial-out ingestion daemon (`:50051`).
+- `postgres`: Persistent relational database (`:5432`).
+- `redis`: In-memory port state cache and queue backend (`:6379`).
+- `influxdb`: Time-series optical metrics engine (`:8086`).
+
+### 3. Verify Health
+
+```bash
+# Check running containers
+docker compose ps
+
+# View gRPC telemetry listener logs
+docker compose logs -f ruijie-grpc-listener
+
+# View API server logs
+docker compose logs -f ruijie-config-generator
+```
+
+---
+
+## 🛠️ Bare-Metal / Local Development Setup
+
+If you prefer running services directly on the host machine:
 
 ### Prerequisites
-Make sure you have [Node.js](https://nodejs.org/) installed on your machine.
+- Node.js >= 20.x
+- Docker or native services for PostgreSQL, Redis, and InfluxDB
+- `gnmic` CLI tool (installed to `/usr/local/bin/gnmic` or in `$PATH`)
 
-### One-Click Start (Recommended)
-You can start both the frontend and backend concurrently using the provided shell script:
+### Fast Startup
+Run the unified multi-process runner:
 
 ```bash
 chmod +x start.sh
 ./start.sh
 ```
-*The app will automatically launch. Access the UI at **http://localhost:5173**.*
 
-### Manual Start
+`start.sh` automatically checks for Docker dependencies, starts the backend (`:3001`), gRPC listener (`:50051`), and Vite dev server (`:5173`).
 
-If you prefer to start them separately:
+---
 
-**1. Start the Backend**
-```bash
-cd backend
-npm install
-npm run dev
-```
-*The API server starts at **http://localhost:3001**.*
+## ⚙️ Switch Configuration Guide
 
-**2. Start the Frontend**
-```bash
-cd frontend
-npm install
-npm run dev
-```
-*The UI opens at **http://localhost:5173** (Vite automatically proxies `/api` calls to the backend).*
+### 1. Modern Switches (RGOS 12.x / OpenConfig Supported)
 
-## 🏗️ Architecture
+Configure the switch to dial out to your collector server:
 
-| Layer    | Stack                         | Purpose                        |
-| -------- | ----------------------------- | ------------------------------ |
-| Backend  | Express + SQLite + Socket.IO  | REST API + Websockets + DB     |
-| Frontend | Vue 3 + Vite + Tailwind v4 + Shadcn | Interactive Switch Visualizer  |
-| Storage  | `backend/data/database.sqlite`| Local persistent database      |
-
-## 🔒 Security Note
-
-By default, network topologies and VLAN information generated by this tool are treated as sensitive information. 
-The internal databases (`backend/data/db.json` and `backend/data/database.sqlite`) where VLANs, device data, and past deployments are stored are included in `.gitignore` and are explicitly **not** checked into version control.
-
-## 🛠️ Configuration & Customization
-
-The application is initially seeded by a local JSON file (`backend/data/db.json`). When the backend runs for the first time, it reads this JSON file and populates the SQLite database (`backend/data/database.sqlite`). Subsequent modifications should be made directly to the database or by wiping the SQLite file to force a re-seed from the JSON.
-
-### Adding VLANs
-To populate your VLAN list in the UI, edit the `vlans` array in `backend/data/db.json`. (This is intentionally not hardcoded in the source code to protect internal network topology information).
-
-```json
-"vlans": [
-  { "id": 99, "name": "Management" },
-  { "id": 189, "name": "ServerDMZ" }
-]
+```text
+configure terminal
+grpc
+ server port 50052
+ rpc gnmi enable
+ sensor-group FAST_METRICS
+  sensor-path openconfig-interfaces:interfaces
+  exit-sensor-group
+ sensor-group SLOW_METRICS
+  sensor-path openconfig-lldp:lldp
+  sensor-path /openconfig-platform:components/component/transceiver
+  exit-sensor-group
+ destination-group FLEET_BACKEND
+  ip <COLLECTOR_IP> port 50051
+  exit-destination-group
+ subscription FLEET_STREAM
+  sensor-group FAST_METRICS sample-interval 5000
+  sensor-group SLOW_METRICS sample-interval 60000
+  destination-group FLEET_BACKEND
+  exit-grpc-subscription
+end
+write
 ```
 
-### Supported Hardware Models
-The app ships with several default Ruijie models configured in the database:
-- `RG-S6150-48VS8CQ-X` (48x 10G/25G, 8x 100G)
-- `RG-S5315-24MG6XS-UP-E` (24x 1G/2.5G, 6x 10G)
-- `RG-S5350-24GT4XS-P-E` / `RG-S5350-24GT4XS-E` (24x 1G, 4x 10G)
-- `RG-S5350-12GT4XS-P-E` (12x 1G, 4x 10G)
-- `RG-S5000-10GT2MS-P-E` (10x 1G, 2x 2.5G)
-- `RG-IS5200-24GT4XS-UP-DC` (Industrial, 24x 1G, 4x 10G)
+> **Tip**: You can push this snippet automatically to all eligible switches with one click from the **Global Config** modal in the Fleet Management UI.
 
-### Adding a New Switch Type
-You can add any switch model by extending the `hardware` array in `backend/data/db.json`. 
+### 2. Verification on Switch CLI
 
-The UI automatically builds the interactive switch face based on these definitions. For example, to add a 24-port switch with 4 10G uplinks:
-
-```json
-{
-  "id": "RG-SNEW-24GT4XS",
-  "portPrefix": "GigabitEthernet 0/",
-  "totalPorts": 24,
-  "uplinkPrefix": "TenGigabitEthernet 0/",
-  "uplinkPorts": [25, 26, 27, 28]
-}
+```text
+show grpc openconfig subscription
 ```
-- **`portPrefix`**: The CLI prefix for standard access ports.
-- **`totalPorts`**: The number of standard ports (the UI draws these dynamically).
-- **`uplinkPrefix`**: The CLI prefix for the uplink ports.
-- **`uplinkPorts`**: An array of the specific port numbers designated as uplinks.
+
+You should see:
+```text
+subscription FLEET_STREAM:
+  sensor group FAST_METRICS:
+    sample interval: 5000
+    sensor path: openconfig-interfaces:interfaces
+      state: RESOLVED
+      recv count: 1245
+```
+
+### 3. Legacy Switches & Fallback Notes
+
+- **RGOS 11.x (e.g., S6250 firmware)**: Accepts the gRPC CLI syntax but does not implement OpenConfig operational telemetry paths (reports `GIVEUP`). The backend automatically recognizes this and keeps the switch on high-speed SSH scraping (`show interfaces status`).
+- **RG-S5000-10GT series**: CLI lacks gRPC module support. Handled automatically via SSH polling.
+
+---
+
+## 🔒 Security & Best Practices
+
+1. **Firewall & Routing**: Ensure switch management VLANs can reach the collector server on TCP port `50051` (gRPC Dial-Out) and that the collector can reach switches on TCP port `22` (SSH) and `50052` (gNMI Dial-In for PoE).
+2. **Authentication**: Set `DISABLE_AUTH=false` and configure Google OAuth (`GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `ALLOWED_EMAILS`) for production environments.
+3. **Database Secrets**: Never commit `.env` or `backend/data/` files to Git. All device credentials stored in PostgreSQL should use non-default administrative credentials.
+
+---
 
 ## 📄 License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+MIT License. Designed and maintained for enterprise network operations.

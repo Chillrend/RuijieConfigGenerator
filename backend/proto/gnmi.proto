@@ -1,0 +1,77 @@
+syntax = "proto3";
+
+package gnmi;
+
+message SubscribeRequest {
+  oneof request {
+    SubscriptionList subscribe = 1;
+    Poll poll = 3;
+  }
+}
+
+message Poll {}
+
+message SubscribeResponse {
+  oneof response {
+    Notification update = 1;
+    bool sync_response = 3;
+    Error error = 4;
+  }
+}
+
+message Notification {
+  int64 timestamp = 1;
+  Path prefix = 2;
+  string alias = 3;
+  repeated Update update = 4;
+  repeated Path delete = 5;
+  bool atomic = 6;
+}
+
+message Update {
+  Path path = 1;
+  TypedValue val = 3;
+  uint32 duplicates = 4;
+}
+
+message TypedValue {
+  oneof value {
+    string string_val = 1;
+    int64 int_val = 2;
+    uint64 uint_val = 3;
+    bool bool_val = 4;
+    bytes bytes_val = 5;
+    double double_val = 14;
+    bytes json_val = 10;
+    bytes json_ietf_val = 11;
+    string ascii_val = 12;
+    bytes proto_bytes = 13;
+  }
+}
+
+message Path {
+  repeated string element = 1;
+  string origin = 2;
+  repeated PathElem elem = 3;
+  string target = 4;
+}
+
+message PathElem {
+  string name = 1;
+  map<string, string> key = 2;
+}
+
+message SubscriptionList {
+  Path prefix = 1;
+  repeated Subscription subscription = 2;
+}
+
+message Subscription {
+  Path path = 1;
+  uint64 sample_interval = 3;
+}
+
+message Error {
+  uint32 code = 1;
+  string message = 2;
+}
