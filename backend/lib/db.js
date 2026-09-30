@@ -265,7 +265,13 @@ async function runSchema(db, type) {
   }
 
   // Seed/sync default hardware templates from json
-  const jsonPath = path.join(backendRoot, 'data', 'db.json');
+  let jsonPath = path.join(backendRoot, 'data', 'db.json');
+  if (!fs.existsSync(jsonPath)) {
+    const examplePath = path.join(backendRoot, 'data', 'db.json.example');
+    if (fs.existsSync(examplePath)) {
+      jsonPath = examplePath;
+    }
+  }
   if (fs.existsSync(jsonPath)) {
     const data = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'));
     if (data.hardware) {
