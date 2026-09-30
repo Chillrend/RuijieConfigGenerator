@@ -210,6 +210,59 @@ subscription FLEET_STREAM:
 
 ---
 
+## 🖥️ UI & Feature Walkthrough
+
+### 1. Fleet Management Dashboard
+- **IP Numerical Sorting & Pagination**: Sort switches cleanly by IPv4 address without string-sorting quirks (`10.90.1.2` before `10.90.1.10`).
+- **Telemetry Indicators**: Real-time badges for **gRPC Live** (green), **SSH Fallback** (blue), and **Offline** (red).
+- **Port Utilization Counters**: Live counters for operational ports (e.g., `8/57 Up`) and active uplink counts.
+- **Global Config Modal**:
+  - Push gRPC Dial-Out configuration to all eligible switches simultaneously.
+  - Backup `show running-config` across the entire fleet in parallel with live progress tracking.
+
+### 2. Switch Detail & Visual Faceplate
+- **Interactive Visual Faceplate**: Dynamic port rendering based on model specifications (GigabitEthernet, TenGigabitEthernet, 25G, 40G, 100G).
+- **Detailed Port Table**:
+  - Live link state, admin status, negotiated speed, duplex.
+  - VLAN assignments (Access & Trunk) with truncated display and hover tooltips for large VLAN lists.
+  - Real-time optical DDM readings (Tx/Rx power in dBm, temperature, voltage) with colored health warnings.
+  - Live PoE wattage consumption and power status.
+- **Per-Port Fast Config**: Quick-toggle port status, change VLANs, or edit port descriptions without leaving the browser.
+
+### 3. Visual Switch Provisioner (New Devices)
+- **Visual Port Assignment**: Click-and-drag across ports to assign Access/Trunk modes and VLANs.
+- **Strict Provisioning**: Captures Serial Number (S/N) and MAC address before generating configuration.
+- **Barcode & DataMatrix Scanner**: Pair a smartphone via QR code to scan hardware box barcodes directly into the web form.
+- **Printable Deployment Summary**: Generates clean, print-ready deployment sheets with DataMatrix inventory tags and configuration summaries.
+
+---
+
+## 🛠️ Hardware Models & Customization
+
+The system comes pre-seeded with support for common Ruijie enterprise and datacenter switches:
+- `RG-S6250-48XS8CQ` (48x 10G SFP+, 8x 100G QSFP28)
+- `RG-S6150-48VS8CQ-X` (48x 10G/25G SFP28, 8x 100G QSFP28)
+- `RG-S5350-24GT4XS-P-E` / `RG-S5350-24GT4XS-E` (24x 1G RJ45 PoE+, 4x 10G SFP+)
+- `RG-S5350-12GT4XS-P-E` (12x 1G RJ45 PoE+, 4x 10G SFP+)
+- `RG-S5315-24MG6XS-UP-E` (24x Multi-Gigabit PoE++, 6x 10G SFP+)
+- `RG-S5000-10GT2MS-P-E` (10x 1G RJ45 PoE+, 2x 2.5G SFP)
+- `RG-IS5200-24GT4XS-UP-DC` (Industrial, 24x 1G, 4x 10G SFP+)
+
+### Adding a New Switch Model
+You can define any new Ruijie switch model in `backend/data/db.json`:
+
+```json
+{
+  "id": "RG-SNEW-24GT4XS",
+  "portPrefix": "GigabitEthernet 0/",
+  "totalPorts": 24,
+  "uplinkPrefix": "TenGigabitEthernet 0/",
+  "uplinkPorts": [25, 26, 27, 28]
+}
+```
+
+---
+
 ## 🔒 Security & Best Practices
 
 1. **Firewall & Routing**: Ensure switch management VLANs can reach the collector server on TCP port `50051` (gRPC Dial-Out) and that the collector can reach switches on TCP port `22` (SSH) and `50052` (gNMI Dial-In for PoE).
