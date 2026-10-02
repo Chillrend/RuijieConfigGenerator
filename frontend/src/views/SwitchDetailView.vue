@@ -9,6 +9,7 @@ import { Input } from '../components/ui/input'
 import { Label } from '../components/ui/label'
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card'
 import { ScrollArea, ScrollBar } from '../components/ui/scroll-area'
+import EditSwitchModal from '../components/EditSwitchModal.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -21,6 +22,40 @@ const activeTab = ref('ports') // 'ports' | 'optical' | 'lldp' | 'config'
 const opticalHistory = ref([])
 const errorMsg = ref('')
 const deployingGrpc = ref(false)
+const editModalOpen = ref(false)
+
+const handleSwitchSaved = (updatedData) => {
+  if (!sw.value) return
+  if (updatedData.mgmt_ip && updatedData.mgmt_ip !== sw.value.mgmt_ip && socket) {
+    socket.emit('leave:switch', sw.value.mgmt_ip)
+    socket.emit('join:switch', updatedData.mgmt_ip)
+  }
+  Object.assign(sw.value, updatedData)
+  fetchSwitch()
+}
+
+const handleSwitchDeleted = () => {
+  router.push('/fleet')
+}
+
+const deleteThisSwitch = async () => {
+  if (!sw.value) return
+  const hostLabel = sw.value.hostname || sw.value.mgmt_ip || 'this switch'
+  if (!confirm(`Are you sure you want to remove ${hostLabel} (${sw.value.mgmt_ip}) from fleet management?`)) {
+    return
+  }
+  try {
+    const res = await fetch(`/api/fleet/${sw.value.id}`, {
+      method: 'DELETE',
+      credentials: 'include'
+    })
+    const data = await res.json()
+    if (!res.ok) throw new Error(data.error || 'Failed to delete switch')
+    router.push('/fleet')
+  } catch (err) {
+    alert(err.message)
+  }
+}
 
 let socket = null
 
@@ -502,6 +537,10 @@ onMounted(() => {
       </div>
 
       <div class="flex items-center gap-2">
+        <Button size="sm" variant="outline" @click="editModalOpen = true">
+          <Icon icon="carbon:edit" class="w-3.5 h-3.5 mr-1" />
+          Edit Profile
+        </Button>
         <Button size="sm" variant="outline" @click="fetchSwitch" :disabled="loading">
           <Icon icon="lucide:rotate-ccw" class="w-3.5 h-3.5 mr-1" />
           Reload
@@ -509,6 +548,16 @@ onMounted(() => {
         <Button size="sm" @click="syncSwitch" :disabled="syncing">
           <Icon icon="lucide:refresh-cw" class="w-3.5 h-3.5 mr-1.5" :class="syncing ? 'animate-spin' : ''" />
           {{ syncing ? 'Syncing via SSH...' : 'Sync Switch' }}
+        </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          class="text-destructive hover:text-destructive hover:bg-destructive/10 border-destructive/30"
+          title="Delete switch from fleet"
+          @click="deleteThisSwitch"
+        >
+          <Icon icon="lucide:trash-2" class="w-3.5 h-3.5 mr-1" />
+          Delete
         </Button>
       </div>
     </div>
@@ -598,9 +647,14 @@ onMounted(() => {
                   <Icon icon="carbon:terminal" class="w-3.5 h-3.5" />
                   SSH Fallback
                 </Badge>
-                <span class="text-xs px-2 py-0.5 rounded-md font-mono bg-muted text-muted-foreground border">
-                  {{ sw.inventory_tag || 'INV-NONE' }}
-                </span>
+                <button
+                  @click="editModalOpen = true"
+                  class="text-xs px-2 py-0.5 rounded-md font-mono bg-muted text-muted-foreground border hover:text-foreground hover:border-primary/50 transition-colors inline-flex items-center gap-1 cursor-pointer"
+                  title="Click to edit switch profile"
+                >
+                  <span>{{ sw.inventory_tag || 'INV-NONE' }}</span>
+                  <Icon icon="carbon:edit" class="w-3 h-3 text-muted-foreground" />
+                </button>
               </div>
               <div class="flex flex-wrap items-center gap-y-1 gap-x-4 mt-2 text-xs text-muted-foreground font-mono">
                 <div>IP: <span class="text-foreground font-semibold">{{ sw.mgmt_ip }}</span></div>
@@ -1551,6 +1605,14 @@ onMounted(() => {
         </div>
       </div>
     </Teleport>
+
+    <!-- Edit Switch Profile Modal -->
+    <EditSwitchModal
+      v-model:open="editModalOpen"
+      :switch-data="sw"
+      @saved="handleSwitchSaved"
+      @deleted="handleSwitchDeleted"
+    />
   </div>
 </template>
 

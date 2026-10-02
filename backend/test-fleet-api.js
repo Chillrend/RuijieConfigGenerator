@@ -120,6 +120,34 @@ interface GigabitEthernet 0/5
   ]);
   console.log('✓ Unsupported features captured in unmanaged_lines without loss!');
 
+  // Test Switch Profile Update in DB
+  console.log('\n--- Testing Switch Profile Update ---');
+  const originalSw = await db.get('SELECT * FROM switches WHERE id = ?', [sw1.id]);
+  const testTag = 'TEST-TAG-' + Date.now();
+  await db.run(
+    `UPDATE switches SET
+      hostname = ?, mgmt_ip = ?, admin_username = ?, admin_password = ?,
+      enable_password = ?, inventory_tag = ?, model_id = ?, serial_number = ?,
+      mac_address = ?, updated_at = CURRENT_TIMESTAMP
+     WHERE id = ?`,
+    [originalSw.hostname, originalSw.mgmt_ip, originalSw.admin_username, originalSw.admin_password,
+     originalSw.enable_password, testTag, 'RG-S6250-48XS8CQ', 'SNTEST123', '00:11:22:33:44:55', originalSw.id]
+  );
+  const updated = await db.get('SELECT * FROM switches WHERE id = ?', [sw1.id]);
+  assert.strictEqual(updated.inventory_tag, testTag);
+  assert.strictEqual(updated.model_id, 'RG-S6250-48XS8CQ');
+  assert.strictEqual(updated.serial_number, 'SNTEST123');
+  assert.strictEqual(updated.mac_address, '00:11:22:33:44:55');
+
+  // Revert back to original
+  await db.run(
+    `UPDATE switches SET
+      inventory_tag = ?, model_id = ?, serial_number = ?, mac_address = ?, updated_at = CURRENT_TIMESTAMP
+     WHERE id = ?`,
+    [originalSw.inventory_tag, originalSw.model_id, originalSw.serial_number, originalSw.mac_address, originalSw.id]
+  );
+  console.log('✓ Switch profile updates and preserves metadata correctly!');
+
   console.log('\nAll fleet integration tests completed successfully!');
   process.exit(0);
 }

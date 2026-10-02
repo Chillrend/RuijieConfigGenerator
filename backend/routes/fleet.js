@@ -585,27 +585,74 @@ router.post('/:id/hostname', async (req, res) => {
 
 // Update switch metadata / credentials
 router.put('/:id', async (req, res) => {
-  const { hostname, mgmt_ip, admin_username, admin_password, enable_password, inventory_tag } = req.body;
+  const {
+    hostname,
+    mgmt_ip,
+    admin_username,
+    admin_password,
+    enable_password,
+    inventory_tag,
+    model_id,
+    serial_number,
+    mac_address
+  } = req.body;
+
   try {
     const db = getDB();
     const sw = await db.get('SELECT * FROM switches WHERE id = ?', [req.params.id]);
     if (!sw) return res.status(404).json({ error: 'Switch not found' });
 
-    const newHostname = hostname || sw.hostname;
-    const newIp = mgmt_ip || sw.mgmt_ip;
-    const newAdminUser = admin_username !== undefined ? admin_username : sw.admin_username;
+    const newHostname = hostname !== undefined ? (hostname || '').trim() : sw.hostname;
+    const newIp = mgmt_ip !== undefined ? (mgmt_ip || '').trim() : sw.mgmt_ip;
+    if (!newIp) {
+      return res.status(400).json({ error: 'Management IP is required' });
+    }
+
+    if (newIp !== sw.mgmt_ip) {
+      const existing = await db.get('SELECT id, hostname FROM switches WHERE mgmt_ip = ? AND id != ?', [newIp, req.params.id]);
+      if (existing) {
+        return res.status(409).json({ error: `Switch with IP ${newIp} already exists (${existing.hostname || 'ID: ' + existing.id})` });
+      }
+    }
+
+    const newAdminUser = admin_username !== undefined ? (admin_username || 'admin').trim() : sw.admin_username;
     const newAdminPass = admin_password && admin_password !== '********' ? admin_password : sw.admin_password;
     const newEnablePass = enable_password && enable_password !== '********' ? enable_password : sw.enable_password;
-    const newTag = inventory_tag !== undefined ? inventory_tag : sw.inventory_tag;
+    const newTag = inventory_tag !== undefined ? (inventory_tag || '').trim() : sw.inventory_tag;
+    const newModel = model_id !== undefined ? (model_id || '').trim() : sw.model_id;
+    const newSn = serial_number !== undefined ? (serial_number || '').trim() : sw.serial_number;
+    const newMac = mac_address !== undefined ? (mac_address || '').trim() : sw.mac_address;
 
     await db.run(
       `UPDATE switches SET
-        hostname = ?, mgmt_ip = ?, admin_username = ?, admin_password = ?, enable_password = ?, inventory_tag = ?, updated_at = CURRENT_TIMESTAMP
+        hostname = ?,
+        mgmt_ip = ?,
+        admin_username = ?,
+        admin_password = ?,
+        enable_password = ?,
+        inventory_tag = ?,
+        model_id = ?,
+        serial_number = ?,
+        mac_address = ?,
+        updated_at = CURRENT_TIMESTAMP
        WHERE id = ?`,
-      [newHostname, newIp, newAdminUser, newAdminPass, newEnablePass, newTag, req.params.id]
+      [newHostname, newIp, newAdminUser, newAdminPass, newEnablePass, newTag, newModel, newSn, newMac, req.params.id]
     );
 
-    res.json({ success: true, message: 'Switch updated' });
+    res.json({
+      success: true,
+      message: 'Switch updated successfully',
+      switch: {
+        id: sw.id,
+        hostname: newHostname,
+        mgmt_ip: newIp,
+        admin_username: newAdminUser,
+        inventory_tag: newTag,
+        model_id: newModel,
+        serial_number: newSn,
+        mac_address: newMac
+      }
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -615,7 +662,15 @@ router.put('/:id', async (req, res) => {
 router.delete('/:id', async (req, res) => {
   try {
     const db = getDB();
+    const sw = await db.get('SELECT mgmt_ip FROM switches WHERE id = ?', [req.params.id]);
+    await db.run('DELETE FROM telemetry_history WHERE switch_id = ?', [req.params.id]);
     await db.run('DELETE FROM switches WHERE id = ?', [req.params.id]);
+    if (sw?.mgmt_ip) {
+      try {
+        const redis = getRedis();
+        await redis.del(`sw:${sw.mgmt_ip}:telemetry`);
+      } catch (e) {}
+    }
     res.json({ success: true, message: 'Switch deleted from fleet' });
   } catch (err) {
     res.status(500).json({ error: err.message });
