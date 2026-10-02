@@ -1,0 +1,124 @@
+{
+  "vlans": [
+    {
+      "id": 1,
+      "name": "Default"
+    },
+    {
+      "id": 10,
+      "name": "Data"
+    },
+    {
+      "id": 20,
+      "name": "Voice"
+    },
+    {
+      "id": 30,
+      "name": "Guest"
+    },
+    {
+      "id": 50,
+      "name": "Servers"
+    },
+    {
+      "id": 99,
+      "name": "Management"
+    }
+  ],
+  "hardware": [
+    {
+      "id": "RG-S6250-48XS8CQ",
+      "portPrefix": "TenGigabitEthernet 0/",
+      "totalPorts": 48,
+      "uplinkPrefix": "HundredGigabitEthernet 0/",
+      "uplinkPorts": [49, 50, 51, 52, 53, 54, 55, 56]
+    },
+    {
+      "id": "RG-S6150-48VS8CQ-X",
+      "portPrefix": "TFGigabitEthernet 0/",
+      "totalPorts": 48,
+      "uplinkPrefix": "HundredGigabitEthernet 0/",
+      "uplinkPorts": [49, 50, 51, 52, 53, 54, 55, 56]
+    },
+    {
+      "id": "RG-S5315-24MG6XS-UP-E",
+      "portPrefix": "MTGigabitEthernet 0/",
+      "totalPorts": 24,
+      "uplinkPrefix": "TenGigabitEthernet 0/",
+      "uplinkPorts": [25, 26, 27, 28, 29, 30]
+    },
+    {
+      "id": "RG-S5350-24GT4XS-P-E",
+      "portPrefix": "GigabitEthernet 0/",
+      "totalPorts": 24,
+      "uplinkPrefix": "TenGigabitEthernet 0/",
+      "uplinkPorts": [25, 26, 27, 28]
+    },
+    {
+      "id": "RG-S5350-24GT4XS-E",
+      "portPrefix": "GigabitEthernet 0/",
+      "totalPorts": 24,
+      "uplinkPrefix": "TenGigabitEthernet 0/",
+      "uplinkPorts": [25, 26, 27, 28]
+    },
+    {
+      "id": "RG-S5350-12GT4XS-P-E",
+      "portPrefix": "GigabitEthernet 0/",
+      "totalPorts": 12,
+      "uplinkPrefix": "TenGigabitEthernet 0/",
+      "uplinkPorts": [13, 14, 15, 16]
+    },
+    {
+      "id": "RG-S5000-10GT2MS-P-E",
+      "portPrefix": "GigabitEthernet 0/",
+      "totalPorts": 10,
+      "uplinkPrefix": "TenGigabitEthernet 0/",
+      "uplinkPorts": [11, 12]
+    },
+    {
+      "id": "RG-IS5200-24GT4XS-UP-DC",
+      "portPrefix": "GigabitEthernet 0/",
+      "totalPorts": 24,
+      "uplinkPrefix": "TenGigabitEthernet 0/",
+      "uplinkPorts": [25, 26, 27, 28]
+    }
+  ],
+  "portProfiles": [
+    {
+      "id": 1,
+      "name": "📹 CCTV",
+      "mode": "access",
+      "vlan": "30",
+      "allowed_vlans": "all",
+      "native_vlan": "",
+      "description": "CCTV",
+      "poeMode": "default",
+      "poePriority": "default",
+      "poeMaxPower": ""
+    },
+    {
+      "id": 2,
+      "name": "🔗 Uplink (Trunk)",
+      "mode": "trunk",
+      "vlan": "1",
+      "allowed_vlans": "all",
+      "native_vlan": "99",
+      "description": "UPLINK/DOWNLINK",
+      "poeMode": "default",
+      "poePriority": "default",
+      "poeMaxPower": ""
+    },
+    {
+      "id": 3,
+      "name": "📶 Wireless AP",
+      "mode": "access",
+      "vlan": "10",
+      "allowed_vlans": "all",
+      "native_vlan": "",
+      "description": "Access Point",
+      "poeMode": "enabled",
+      "poePriority": "critical",
+      "poeMaxPower": "30000"
+    }
+  ]
+}

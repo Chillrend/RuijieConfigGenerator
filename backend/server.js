@@ -11,122 +11,57 @@ import { Strategy as GoogleStrategy } from 'passport-google-oauth20';
 import jwt from 'jsonwebtoken';
 import cookieParser from 'cookie-parser';
 import dotenv from 'dotenv';
-
-// Load environment variables
-dotenv.config();
+import http from 'http';
+import { Server as SocketIOServer } from 'socket.io';
+import IORedis from 'ioredis';
+import { initDatabase, syncSwitchesFromDeployments } from './lib/db.js';
+import fleetRouter from './routes/fleet.js';
+import { initInflux } from './lib/influx.js';
+import { initQueue, startPeriodicPolling, startDailyConfigBackup } from './lib/queue.js';
+import { getRedis } from './lib/redis.js';
 
 // --- ESM __dirname workaround ---
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// Load environment variables from backend directory
+dotenv.config({ path: path.join(__dirname, '.env') });
+
 // ────────────────────────────────────────────────────────────
-// 1. Initialize SQLite Database
+// 1. Initialize Database & Fleet Services
 // ────────────────────────────────────────────────────────────
-const dbPath = path.join(__dirname, 'data', 'database.sqlite');
-let db;
+const db = await initDatabase();
+initInflux();
+await initQueue();
+startDailyConfigBackup();
+startPeriodicPolling(15);
 
-async function initDB() {
-  db = await open({
-    filename: dbPath,
-    driver: sqlite3.Database
-  });
-
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS hardware_templates (
-      id TEXT PRIMARY KEY,
-      portPrefix TEXT,
-      totalPorts INTEGER,
-      uplinkPrefix TEXT,
-      uplinkPorts TEXT
-    );
-
-    CREATE TABLE IF NOT EXISTS vlans (
-      id INTEGER PRIMARY KEY,
-      name TEXT
-    );
-
-    CREATE TABLE IF NOT EXISTS port_profiles (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT,
-      mode TEXT,
-      vlan TEXT,
-      allowed_vlans TEXT,
-      native_vlan TEXT,
-      description TEXT,
-      poeMode TEXT,
-      poePriority TEXT,
-      poeMaxPower TEXT
-    );
-
-    CREATE TABLE IF NOT EXISTS deployments (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      serial_number TEXT UNIQUE,
-      mac_address TEXT UNIQUE,
-      hostname TEXT,
-      model_id TEXT,
-      mgmt_ip TEXT,
-      config_payload TEXT,
-      generated_cli TEXT,
-      inventory_tag TEXT,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    );
-  `);
-
-  // Migration for existing table to add inventory_tag if missing
+async function upsertFleetSwitch(payload, serialNumber, macAddress, hostname, modelId, mgmtIp, inventoryTag) {
   try {
-    await db.exec('ALTER TABLE deployments ADD COLUMN inventory_tag TEXT');
-  } catch (e) {
-    // Column might already exist, ignore
-  }
+    const adminUsername = payload?.adminUsername || 'admin';
+    const adminPassword = payload?.adminPassword || '';
+    const enablePassword = payload?.enablePassword || '';
 
-  // Seed data from db.json if tables are empty
-  const hwCount = await db.get('SELECT COUNT(*) as count FROM hardware_templates');
-  if (hwCount.count === 0) {
-    const jsonPath = path.join(__dirname, 'data', 'db.json');
-    if (fs.existsSync(jsonPath)) {
-      const data = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'));
-      if (data.hardware) {
-        const stmt = await db.prepare('INSERT INTO hardware_templates (id, portPrefix, totalPorts, uplinkPrefix, uplinkPorts) VALUES (?, ?, ?, ?, ?)');
-        for (const hw of data.hardware) {
-          await stmt.run(hw.id, hw.portPrefix, hw.totalPorts, hw.uplinkPrefix, JSON.stringify(hw.uplinkPorts));
-        }
-        await stmt.finalize();
-      }
-      if (data.vlans) {
-        const stmt = await db.prepare('INSERT INTO vlans (id, name) VALUES (?, ?)');
-        for (const vlan of data.vlans) {
-          await stmt.run(vlan.id, vlan.name);
-        }
-        await stmt.finalize();
-      }
-      if (data.portProfiles) {
-        const stmt = await db.prepare('INSERT INTO port_profiles (name, mode, vlan, allowed_vlans, native_vlan, description, poeMode, poePriority, poeMaxPower) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
-        for (const profile of data.portProfiles) {
-          await stmt.run(profile.name, profile.mode, profile.vlan, profile.allowed_vlans, profile.native_vlan, profile.description, profile.poeMode, profile.poePriority, profile.poeMaxPower);
-        }
-        await stmt.finalize();
-      }
+    const existing = await db.get('SELECT id FROM switches WHERE serial_number = ? OR (mgmt_ip IS NOT NULL AND mgmt_ip = ?)', [serialNumber, mgmtIp]);
+    if (existing) {
+      await db.run(
+        `UPDATE switches SET
+          hostname = ?, model_id = ?, mgmt_ip = ?, admin_username = ?, admin_password = ?, enable_password = ?, inventory_tag = ?, updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`,
+        [hostname, modelId, mgmtIp, adminUsername, adminPassword, enablePassword, inventoryTag || '', existing.id]
+      );
+    } else {
+      await db.run(
+        `INSERT INTO switches (serial_number, mac_address, hostname, model_id, mgmt_ip, admin_username, admin_password, enable_password, inventory_tag, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'unknown')`,
+        [serialNumber, macAddress, hostname, modelId, mgmtIp, adminUsername, adminPassword, enablePassword, inventoryTag || '']
+      );
     }
-  } else {
-    // If we have hardware but maybe no port_profiles yet (migration)
-    const profileCount = await db.get('SELECT COUNT(*) as count FROM port_profiles');
-    if (profileCount.count === 0) {
-      const jsonPath = path.join(__dirname, 'data', 'db.json');
-      if (fs.existsSync(jsonPath)) {
-        const data = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'));
-        if (data.portProfiles) {
-          const stmt = await db.prepare('INSERT INTO port_profiles (name, mode, vlan, allowed_vlans, native_vlan, description, poeMode, poePriority, poeMaxPower) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
-          for (const profile of data.portProfiles) {
-            await stmt.run(profile.name, profile.mode, profile.vlan, profile.allowed_vlans, profile.native_vlan, profile.description, profile.poeMode, profile.poePriority, profile.poeMaxPower);
-          }
-          await stmt.finalize();
-        }
-      }
-    }
+  } catch (err) {
+    console.error('Failed to sync deployment to fleet switch:', err.message);
   }
 }
 
-await initDB();
 
 // ────────────────────────────────────────────────────────────
 // 2. Handlebars Setup
@@ -145,7 +80,7 @@ const configTemplate = Handlebars.compile(templateSource);
 const app = express();
 // Configure CORS to allow credentials from the frontend
 app.use(cors({
-  origin: 'http://localhost:5173', // Vite default port
+  origin: true,
   credentials: true
 }));
 app.use(express.json());
@@ -238,16 +173,28 @@ app.post('/api/auth/logout', (req, res) => {
   res.json({ success: true });
 });
 
+// ── Fleet Management Routes ─────────────────────────────────
+app.use('/api/fleet', requireAuth, fleetRouter);
+
 // ── GET /api/setup ──────────────────────────────────────────
 app.get('/api/setup', requireAuth, async (_req, res) => {
   const hardwareRows = await db.all('SELECT * FROM hardware_templates');
   const vlans = await db.all('SELECT * FROM vlans');
   const portProfiles = await db.all('SELECT * FROM port_profiles');
   
-  const hardware = hardwareRows.map(hw => ({
-    ...hw,
-    uplinkPorts: JSON.parse(hw.uplinkPorts)
-  }));
+  const hardware = hardwareRows.map(hw => {
+    let uplinkPorts = [];
+    try {
+      const raw = hw.uplinkPorts || hw.uplinkports;
+      uplinkPorts = typeof raw === 'string' ? JSON.parse(raw) : (raw || []);
+    } catch (e) {
+      uplinkPorts = [];
+    }
+    return {
+      ...hw,
+      uplinkPorts
+    };
+  });
 
   res.json({ hardware, vlans, portProfiles });
 });
@@ -416,9 +363,14 @@ app.put('/api/deployments/:id', requireAuth, async (req, res) => {
       if (generated_cli === undefined && generatedCli === undefined) {
         const hwRow = await db.get('SELECT * FROM hardware_templates WHERE id = ?', [existing.model_id]);
         if (hwRow && Array.isArray(payloadObj.ports)) {
+          let uplinkPorts = [];
+          try {
+            const raw = hwRow.uplinkPorts || hwRow.uplinkports;
+            uplinkPorts = typeof raw === 'string' ? JSON.parse(raw) : (raw || []);
+          } catch (e) {}
           const model = {
             ...hwRow,
-            uplinkPorts: JSON.parse(hwRow.uplinkPorts)
+            uplinkPorts
           };
           const uplinkSet = new Set(model.uplinkPorts);
           const mappedPorts = payloadObj.ports
@@ -477,6 +429,8 @@ app.put('/api/deployments/:id', requireAuth, async (req, res) => {
       SET serial_number = ?, mac_address = ?, hostname = ?, mgmt_ip = ?, inventory_tag = ?, config_payload = ?, generated_cli = ?
       WHERE id = ?
     `, [newSN, newMac, newHostname, newMgmtIp, newInventoryTag, updatedPayload, updatedCli, deploymentId]);
+
+    await upsertFleetSwitch(req.body, newSN, newMac, newHostname, existing.model_id, newMgmtIp, newInventoryTag);
 
     const updated = await db.get('SELECT * FROM deployments WHERE id = ?', deploymentId);
     res.json(updated);
@@ -556,9 +510,14 @@ app.post('/api/generate-config', requireAuth, async (req, res) => {
   if (!hwRow) {
     return res.status(404).json({ error: `Hardware model "${modelId}" not found` });
   }
+  let uplinkPorts = [];
+  try {
+    const raw = hwRow.uplinkPorts || hwRow.uplinkports;
+    uplinkPorts = typeof raw === 'string' ? JSON.parse(raw) : (raw || []);
+  } catch (e) {}
   const model = {
     ...hwRow,
-    uplinkPorts: JSON.parse(hwRow.uplinkPorts)
+    uplinkPorts
   };
 
   const uplinkSet = new Set(model.uplinkPorts);
@@ -618,6 +577,7 @@ app.post('/api/generate-config', requireAuth, async (req, res) => {
         SET serial_number = ?, mac_address = ?, hostname = ?, model_id = ?, mgmt_ip = ?, config_payload = ?, generated_cli = ?, inventory_tag = ?
         WHERE id = ?
       `, [serialNumber, macAddress || null, hostname, modelId, mgmtIp || null, JSON.stringify(req.body), configText, existingTag, editingDeploymentId]);
+      await upsertFleetSwitch(req.body, serialNumber, macAddress, hostname, modelId, mgmtIp, existingTag);
     } catch (err) {
       console.error('Error updating deployment:', err);
       return res.status(500).json({ error: 'Failed to update deployment in database' });
@@ -638,6 +598,7 @@ app.post('/api/generate-config', requireAuth, async (req, res) => {
       INSERT INTO deployments (serial_number, mac_address, hostname, model_id, mgmt_ip, config_payload, generated_cli, inventory_tag)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `, [serialNumber, macAddress || null, hostname, modelId, mgmtIp || null, JSON.stringify(req.body), configText, inventoryTag]);
+    await upsertFleetSwitch(req.body, serialNumber, macAddress, hostname, modelId, mgmtIp, inventoryTag);
   } catch (err) {
     console.error('Error saving deployment:', err);
     return res.status(500).json({ error: 'Failed to save deployment to database' });
@@ -647,9 +608,89 @@ app.post('/api/generate-config', requireAuth, async (req, res) => {
 });
 
 // ────────────────────────────────────────────────────────────
-// 4. Start Server
+// 4. Start Server & Real-time WebSockets
 // ────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => {
-  console.log(`✅ Backend running → http://localhost:${PORT}`);
+const httpServer = http.createServer(app);
+
+const io = new SocketIOServer(httpServer, {
+  cors: {
+    origin: '*',
+    methods: ['GET', 'POST'],
+    credentials: true
+  }
+});
+
+// Real-time Redis Pub/Sub relay to WebSockets
+const redisUrl = process.env.REDIS_URL || 'redis://localhost:6379';
+const redisSub = new IORedis(redisUrl, { maxRetriesPerRequest: null, retryStrategy: () => 2000 });
+const redisClient = getRedis();
+
+redisSub.subscribe('switch:telemetry:update', 'global-action:progress', (err) => {
+  if (!err) console.log('[Socket.IO] Subscribed to Redis channels switch:telemetry:update, global-action:progress');
+});
+
+redisSub.on('message', async (channel, message) => {
+  if (channel === 'global-action:progress') {
+    try {
+      const data = JSON.parse(message);
+      io.emit('global-action:progress', data);
+    } catch (e) {}
+    return;
+  }
+
+  if (channel === 'switch:telemetry:update') {
+    try {
+      const { ip } = JSON.parse(message);
+      if (ip) {
+        const raw = await redisClient.get(`sw:${ip}:telemetry`);
+        if (raw) {
+          const telemetry = JSON.parse(raw);
+          io.to(`switch:${ip}`).emit('telemetry:update', telemetry);
+
+          // Real-time fleet overview broadcast
+          const isPhysical = (name) => /^(?:MTGigabitEthernet|MTGi|GigabitEthernet|Gi|TenGigabitEthernet|Te|TFGigabitEthernet|TF|TwentyFiveGigabitEthernet|25G|FortyGigabitEthernet|Fo|HundredGigabitEthernet|Hu|FastEthernet|Fa|AggregatePort|Ag)\s*\d/i.test(name || '');
+          const phys = (telemetry.interfaces || []).filter(i => isPhysical(i.name) || isPhysical(i.shortName));
+          const activeCount = phys.filter(i => (i.operStatus || '').toLowerCase() === 'up').length;
+          const upCount = (telemetry.lldp || []).filter(l => l.isUplink).length;
+          const optWarn = (telemetry.optical || []).filter(o => o.status === 'warning' || o.status === 'critical').length;
+
+          io.emit('fleet:switch-update', {
+            ip,
+            status: 'online',
+            active_ports: activeCount,
+            total_ports: phys.length,
+            uplink_count: upCount,
+            optical_warnings: optWarn,
+            last_seen: telemetry.last_seen,
+            telemetry_mode: 'grpc'
+          });
+        }
+      }
+    } catch (e) {
+      // Non-blocking error
+    }
+  }
+});
+
+io.on('connection', (socket) => {
+  socket.on('join:switch', async (ip) => {
+    if (!ip) return;
+    socket.join(`switch:${ip}`);
+    // Immediately stream cached telemetry if available
+    try {
+      const raw = await redisClient.get(`sw:${ip}:telemetry`);
+      if (raw) {
+        socket.emit('telemetry:update', JSON.parse(raw));
+      }
+    } catch (e) {}
+  });
+
+  socket.on('leave:switch', (ip) => {
+    if (ip) socket.leave(`switch:${ip}`);
+  });
+});
+
+httpServer.listen(PORT, () => {
+  console.log(`✅ Backend and WebSocket server running → http://localhost:${PORT}`);
 });
