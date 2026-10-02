@@ -72,8 +72,12 @@ const setupWebSocket = () => {
         const liveIf = ifMap.get(p.name) || ifMap.get(p.shortName)
         if (liveIf) {
           p.operStatus = liveIf.operStatus || p.operStatus
-          p.speed = liveIf.speed || p.speed
-          p.duplex = liveIf.duplex || p.duplex
+          if (liveIf.speed && liveIf.speed.toLowerCase() !== 'auto') {
+            p.speed = liveIf.speed
+          }
+          if (liveIf.duplex && liveIf.duplex.toLowerCase() !== 'auto') {
+            p.duplex = liveIf.duplex
+          }
           if (liveIf.counters) p.counters = liveIf.counters
         }
 
@@ -158,30 +162,102 @@ const formatAllowedVlans = (vlans) => {
   return trimmed
 }
 
-const deployGrpcToThisSwitch = async () => {
-  if (!confirm(`Deploy gRPC Dial-Out Telemetry configuration to ${sw.value?.hostname || sw.value?.mgmt_ip}? This will configure the switch to push metrics directly to the gRPC collector.`)) return
+// Hostname Edit State
+const editingHostname = ref(false)
+const hostnameInput = ref('')
+const savingHostname = ref(false)
+
+const startEditHostname = () => {
+  hostnameInput.value = sw.value?.hostname || ''
+  editingHostname.value = true
+}
+
+const cancelEditHostname = () => {
+  editingHostname.value = false
+}
+
+const saveHostname = async () => {
+  const newName = hostnameInput.value.trim()
+  if (!newName) return
+  savingHostname.value = true
+  try {
+    const res = await fetch(`/api/fleet/${sw.value.id}/hostname`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ hostname: newName })
+    })
+    const data = await res.json()
+    if (!res.ok) throw new Error(data.error || 'Failed to update hostname')
+    sw.value.hostname = newName
+    editingHostname.value = false
+    alert(`Hostname successfully changed to "${newName}" on switch via SSH.`)
+  } catch (err) {
+    alert(`Error updating hostname: ${err.message}`)
+  } finally {
+    savingHostname.value = false
+  }
+}
+
+// gRPC Deploy Modal State
+const grpcModalOpen = ref(false)
+const grpcServerIp = ref('')
+const grpcServerPort = ref(50051)
+
+const openGrpcModal = async () => {
+  grpcServerIp.value = sw.value?.grpc_expected_ip || ''
+  grpcServerPort.value = sw.value?.grpc_expected_port || 50051
+  if (!grpcServerIp.value) {
+    try {
+      const res = await fetch('/api/fleet/global-config/grpc-info', { credentials: 'include' })
+      if (res.ok) {
+        const data = await res.json()
+        grpcServerIp.value = data.collectorIp || ''
+        grpcServerPort.value = data.collectorPort || 50051
+      }
+    } catch (e) {}
+  }
+  grpcModalOpen.value = true
+}
+
+const confirmDeployGrpc = async () => {
+  const targetIp = grpcServerIp.value.trim()
+  const targetPort = parseInt(grpcServerPort.value, 10) || 50051
+  if (!targetIp) {
+    alert('Please enter a valid Collector Server IP')
+    return
+  }
   deployingGrpc.value = true
+  grpcModalOpen.value = false
   const controller = new AbortController()
-  const timeoutId = setTimeout(() => controller.abort(), 20000)
+  const timeoutId = setTimeout(() => controller.abort(), 25000)
   try {
     const res = await fetch('/api/fleet/global-config/deploy-grpc', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
-      body: JSON.stringify({ switchIds: [sw.value.id] }),
+      body: JSON.stringify({
+        switchIds: [sw.value.id],
+        serverIp: targetIp,
+        serverPort: targetPort
+      }),
       signal: controller.signal
     })
     clearTimeout(timeoutId)
     const data = await res.json()
     if (!res.ok) throw new Error(data.error || 'Failed to deploy gRPC')
-    alert('gRPC telemetry deployed successfully! The switch will now stream directly to backend.')
+    alert(`gRPC telemetry deployed successfully pointing to ${targetIp}:${targetPort}! Switch will now stream directly to backend.`)
     await fetchSwitch()
   } catch (err) {
-    alert(`Deploy failed: ${err.name === 'AbortError' ? 'Request timed out after 20s' : err.message}`)
+    alert(`Deploy failed: ${err.name === 'AbortError' ? 'Request timed out after 25s' : err.message}`)
   } finally {
     clearTimeout(timeoutId)
     deployingGrpc.value = false
   }
+}
+
+const deployGrpcToThisSwitch = () => {
+  openGrpcModal()
 }
 
 const syncSwitch = async () => {
@@ -234,6 +310,41 @@ const getTxColor = (tx) => {
   if (tx < -10) return 'text-amber-500 font-semibold'
   return 'text-foreground'
 }
+
+const opticalTransceivers = computed(() => {
+  let list = []
+  if (Array.isArray(sw.value?.optical) && sw.value.optical.length > 0) {
+    list = [...sw.value.optical]
+  } else if (Array.isArray(sw.value?.ports)) {
+    list = sw.value.ports.filter(p => p.optical).map(p => p.optical)
+  }
+
+  // Filter out any non-physical ports like "Slot 0", "Chassis", "AggregatePort"
+  const PORT_NAME_REGEX = /^(?:MTGigabitEthernet|MTGi|GigabitEthernet|Gi|TenGigabitEthernet|Te|TFGigabitEthernet|TF|TwentyFiveGigabitEthernet|25G|FortyGigabitEthernet|Fo|HundredGigabitEthernet|Hu|FastEthernet|Fa)\s*\d/i;
+  list = list.filter(o => o.port && (PORT_NAME_REGEX.test(o.port) || PORT_NAME_REGEX.test(o.portShort)))
+
+  // Restrict to ports that actually exist on this switch (removes phantom breakout channels 0/57..0/88 on modular switches)
+  if (Array.isArray(sw.value?.ports) && sw.value.ports.length > 0) {
+    const portNameSet = new Set()
+    for (const p of sw.value.ports) {
+      if (p.name) portNameSet.add(p.name.toLowerCase().trim())
+      if (p.shortName) portNameSet.add(p.shortName.toLowerCase().trim())
+    }
+    list = list.filter(o => portNameSet.has((o.port || '').toLowerCase().trim()) || portNameSet.has((o.portShort || '').toLowerCase().trim()))
+  }
+
+  // Sort by port index number (e.g. 1..56 or 25..30)
+  list.sort((a, b) => {
+    const aMatch = (a.port || '').match(/\/(\d+)$/)
+    const bMatch = (b.port || '').match(/\/(\d+)$/)
+    if (aMatch && bMatch) {
+      return parseInt(aMatch[1], 10) - parseInt(bMatch[1], 10)
+    }
+    return (a.port || '').localeCompare(b.port || '')
+  })
+
+  return list
+})
 
 // Compute standard 12-port groups and uplink block matching the real physical chassis layout
 const portLayout = computed(() => {
@@ -420,8 +531,36 @@ onMounted(() => {
               <Icon icon="carbon:network-enterprise" class="w-7 h-7" />
             </div>
             <div>
-              <div class="flex items-center gap-2.5">
-                <h1 class="text-xl font-bold">{{ sw.hostname }}</h1>
+              <div class="flex items-center gap-2.5 flex-wrap">
+                <!-- Hostname with inline edit -->
+                <div v-if="!editingHostname" class="flex items-center gap-1.5">
+                  <h1 class="text-xl font-bold">{{ sw.hostname || 'Unnamed Switch' }}</h1>
+                  <button
+                    @click="startEditHostname"
+                    class="text-muted-foreground hover:text-foreground transition-colors p-1 rounded hover:bg-muted"
+                    title="Change switch hostname (applies via SSH to device)"
+                  >
+                    <Icon icon="lucide:pencil" class="w-3.5 h-3.5" />
+                  </button>
+                </div>
+                <div v-else class="flex items-center gap-1.5">
+                  <Input
+                    v-model="hostnameInput"
+                    class="h-7 text-xs font-semibold w-48 font-mono"
+                    placeholder="New hostname"
+                    :disabled="savingHostname"
+                    @keyup.enter="saveHostname"
+                    @keyup.esc="cancelEditHostname"
+                  />
+                  <Button size="sm" class="h-7 px-2 text-xs" :disabled="savingHostname" @click="saveHostname">
+                    <Icon icon="lucide:check" class="w-3 h-3 mr-1" :class="savingHostname ? 'animate-spin' : ''" />
+                    {{ savingHostname ? 'Pushing...' : 'Save' }}
+                  </Button>
+                  <Button size="sm" variant="ghost" class="h-7 px-1.5 text-xs" :disabled="savingHostname" @click="cancelEditHostname">
+                    Cancel
+                  </Button>
+                </div>
+
                 <Badge
                   :variant="sw.status === 'online' ? 'default' : 'destructive'"
                   class="capitalize text-xs font-semibold px-2.5"
@@ -430,8 +569,21 @@ onMounted(() => {
                   <span class="w-1.5 h-1.5 rounded-full bg-white mr-1.5 animate-pulse" v-if="sw.status === 'online'" />
                   {{ sw.status }}
                 </Badge>
+
+                <!-- Wrong gRPC IP warning badge -->
                 <Badge
-                  v-if="sw.telemetry_source === 'grpc' || sw.is_live_grpc"
+                  v-if="sw.grpc_ip_mismatch"
+                  variant="outline"
+                  class="text-xs bg-amber-500/10 text-amber-600 border-amber-500/30 font-mono flex items-center gap-1 cursor-pointer hover:bg-amber-500/20"
+                  :title="`Configured for ${sw.grpc_configured_ip}, but server expects ${sw.grpc_expected_ip}. Click to reconfigure.`"
+                  @click="openGrpcModal"
+                >
+                  <Icon icon="carbon:warning-filled" class="w-3.5 h-3.5 text-amber-500" />
+                  Wrong gRPC IP ({{ sw.grpc_configured_ip }})
+                </Badge>
+
+                <Badge
+                  v-else-if="sw.telemetry_source === 'grpc' || sw.is_live_grpc"
                   variant="outline"
                   class="text-xs bg-emerald-500/10 text-emerald-600 border-emerald-500/20 font-mono flex items-center gap-1"
                 >
@@ -542,6 +694,14 @@ onMounted(() => {
                           icon="ph:lightning-slash-fill"
                           class="w-2.5 h-2.5 text-zinc-400 absolute top-1 right-1"
                         />
+                        <!-- Connected Device (e.g. AP) Icon -->
+                        <span
+                          v-if="port.uplinkNeighbor && !port.isUplink"
+                          class="absolute bottom-0.5 left-1 text-purple-400 leading-none"
+                          :title="`Connected Device: ${port.uplinkNeighbor}`"
+                        >
+                          <Icon icon="carbon:wifi" class="w-2.5 h-2.5" />
+                        </span>
                         <!-- Port ID Number -->
                         <span class="mt-1 font-mono font-bold">{{ port.id }}</span>
                         <!-- Aggregate Port Badge -->
@@ -583,6 +743,14 @@ onMounted(() => {
                           icon="ph:lightning-slash-fill"
                           class="w-2.5 h-2.5 text-zinc-400 absolute top-1 right-1"
                         />
+                        <!-- Connected Device (e.g. AP) Icon -->
+                        <span
+                          v-if="port.uplinkNeighbor && !port.isUplink"
+                          class="absolute bottom-0.5 left-1 text-purple-400 leading-none"
+                          :title="`Connected Device: ${port.uplinkNeighbor}`"
+                        >
+                          <Icon icon="carbon:wifi" class="w-2.5 h-2.5" />
+                        </span>
                         <span class="mt-1 font-mono font-bold">{{ port.id }}</span>
                         <span
                           v-if="port.aggregatePort"
@@ -684,7 +852,7 @@ onMounted(() => {
           :class="activeTab === 'optical' ? 'border-primary text-primary' : 'border-transparent text-muted-foreground hover:text-foreground'"
         >
           <Icon icon="carbon:meter" class="w-4 h-4" />
-          Optical DDM Transceivers ({{ sw.optical?.length || 0 }})
+          Optical DDM Transceivers ({{ opticalTransceivers.filter(o => o.status !== 'absent').length }}/{{ opticalTransceivers.length }})
         </button>
 
         <button
@@ -718,7 +886,7 @@ onMounted(() => {
                 <th class="py-2.5 px-3">Mode</th>
                 <th class="py-2.5 px-3">VLAN</th>
                 <th class="py-2.5 px-3">PoE</th>
-                <th class="py-2.5 px-3">Uplink Peer</th>
+                <th class="py-2.5 px-3">Connected Peer / Device</th>
                 <th class="py-2.5 px-3">Description</th>
                 <th class="py-2.5 px-3 text-right">Actions</th>
               </tr>
@@ -786,15 +954,16 @@ onMounted(() => {
                   <span v-else class="text-muted-foreground text-[11px]">—</span>
                 </td>
 
-                <!-- Uplink Peer -->
+                <!-- Connected Peer / AP / Device -->
                 <td class="py-2 px-3 text-xs max-w-[140px] truncate">
                   <div
-                    v-if="p.isUplink"
-                    :title="`${p.uplinkNeighbor || 'Uplink'}${p.uplinkNeighborPort ? ' (' + p.uplinkNeighborPort + ')' : ''}`"
-                    class="inline-flex items-center gap-1 text-blue-600 font-semibold bg-blue-500/10 px-1.5 py-0.5 rounded text-[11px] whitespace-nowrap cursor-help"
+                    v-if="p.uplinkNeighbor"
+                    :title="`${p.uplinkNeighbor}${p.uplinkNeighborPort ? ' (' + p.uplinkNeighborPort + ')' : ''}`"
+                    class="inline-flex items-center gap-1 font-semibold px-1.5 py-0.5 rounded text-[11px] whitespace-nowrap cursor-help"
+                    :class="p.isUplink ? 'text-blue-600 bg-blue-500/10' : 'text-purple-600 dark:text-purple-400 bg-purple-500/10'"
                   >
-                    <Icon icon="ph:arrow-fat-up-fill" class="w-3 h-3" />
-                    <span class="truncate max-w-[110px]">{{ p.uplinkNeighbor || 'Uplink' }}</span>
+                    <Icon :icon="p.isUplink ? 'ph:arrow-fat-up-fill' : 'carbon:wifi'" class="w-3 h-3" />
+                    <span class="truncate max-w-[110px]">{{ p.uplinkNeighbor }}</span>
                   </div>
                   <span v-else class="text-muted-foreground text-[11px]">—</span>
                 </td>
@@ -827,7 +996,7 @@ onMounted(() => {
             <span class="text-xs text-muted-foreground font-mono">Telemetry pushed to InfluxDB</span>
           </div>
 
-          <div v-if="!sw.optical || sw.optical.length === 0" class="py-12 text-center text-muted-foreground text-sm">
+          <div v-if="!opticalTransceivers || opticalTransceivers.length === 0" class="py-12 text-center text-muted-foreground text-sm">
             No optical transceivers detected or switch has no active fiber ports inserted.
           </div>
 
@@ -845,7 +1014,7 @@ onMounted(() => {
                 </tr>
               </thead>
               <tbody class="divide-y font-mono text-xs">
-                <tr v-for="opt in sw.optical" :key="opt.port" class="hover:bg-muted/30">
+                <tr v-for="opt in opticalTransceivers" :key="opt.port" class="hover:bg-muted/30">
                   <td class="py-3 px-4 font-bold">{{ opt.portShort || opt.port }}</td>
 
                   <td class="py-3 px-4 font-sans text-xs text-muted-foreground truncate max-w-[200px]">
@@ -981,8 +1150,33 @@ onMounted(() => {
       <!-- TAB 4: Raw Running Config -->
       <div v-if="activeTab === 'config'" class="space-y-4">
         <!-- Telemetry Mode Notice -->
+        <!-- Mismatch Warning Banner -->
         <div
-          v-if="!sw.grpc_configured"
+          v-if="sw.grpc_ip_mismatch"
+          class="p-4 rounded-xl border border-rose-500/40 bg-rose-500/10 text-rose-700 dark:text-rose-400 flex items-start gap-3"
+        >
+          <Icon icon="carbon:warning-alt-filled" class="w-5 h-5 shrink-0 mt-0.5 text-rose-500" />
+          <div class="flex-1 text-xs space-y-1">
+            <div class="font-bold text-sm">gRPC Dial-Out Destination IP Mismatch Detected</div>
+            <p>
+              This switch is configured to dial out to <strong>{{ sw.grpc_configured_ip }}:{{ sw.grpc_configured_port || 50051 }}</strong>, but this server instance's collector IP in <code>.env</code> is <strong>{{ sw.grpc_expected_ip }}:{{ sw.grpc_expected_port || 50051 }}</strong>. Live telemetry is not reaching this backend.
+            </p>
+            <div class="pt-2">
+              <Button
+                size="sm"
+                class="bg-rose-600 hover:bg-rose-700 text-white h-7 text-xs font-medium"
+                :disabled="deployingGrpc"
+                @click="openGrpcModal"
+              >
+                <Icon icon="carbon:flash" class="w-3.5 h-3.5 mr-1" />
+                {{ deployingGrpc ? 'Deploying...' : `Update gRPC Destination to ${sw.grpc_expected_ip}` }}
+              </Button>
+            </div>
+          </div>
+        </div>
+
+        <div
+          v-else-if="!sw.grpc_configured"
           class="p-4 rounded-xl border border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400 flex items-start gap-3"
         >
           <Icon icon="carbon:warning-alt" class="w-5 h-5 shrink-0 mt-0.5 text-amber-500" />
@@ -997,7 +1191,7 @@ onMounted(() => {
                 variant="outline"
                 class="h-7 text-xs border-amber-500/40 text-amber-700 dark:text-amber-300 hover:bg-amber-500/20"
                 :disabled="deployingGrpc"
-                @click="deployGrpcToThisSwitch"
+                @click="openGrpcModal"
               >
                 <Icon icon="carbon:flash" class="w-3.5 h-3.5 mr-1" />
                 {{ deployingGrpc ? 'Deploying gRPC...' : 'Enable gRPC Telemetry on this Switch' }}
@@ -1011,11 +1205,23 @@ onMounted(() => {
           class="p-4 rounded-xl border border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 flex items-start gap-3"
         >
           <Icon icon="carbon:checkmark-filled" class="w-5 h-5 shrink-0 mt-0.5 text-emerald-500" />
-          <div class="text-xs space-y-1">
+          <div class="flex-1 text-xs space-y-1">
             <div class="font-bold text-sm">gRPC Dial-Out Telemetry Active</div>
             <p>
-              gRPC dial-out streaming is enabled. Port state, optical transceivers, and LLDP topology are pushed directly to Redis on port 50051. Periodic SSH metric scraping is disabled to reduce load on the switch.
+              gRPC dial-out streaming is enabled and pointing to <strong>{{ sw.grpc_configured_ip || sw.grpc_expected_ip }}:{{ sw.grpc_configured_port || 50051 }}</strong>. Port state, optical transceivers, and LLDP topology are pushed directly to Redis on port 50051.
             </p>
+            <div class="pt-1">
+              <Button
+                size="sm"
+                variant="outline"
+                class="h-6 text-[11px] border-emerald-500/40 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-500/20"
+                :disabled="deployingGrpc"
+                @click="openGrpcModal"
+              >
+                <Icon icon="carbon:settings" class="w-3 h-3 mr-1" />
+                Reconfigure Collector IP / Port
+              </Button>
+            </div>
           </div>
         </div>
 
@@ -1205,6 +1411,83 @@ onMounted(() => {
           >
             <Icon icon="lucide:check" class="w-4 h-4 mr-1.5" />
             {{ portSaving ? 'Applying via SSH...' : 'Apply Delta to Switch' }}
+          </Button>
+        </div>
+      </div>
+    </div>
+
+    <!-- gRPC Deployment Modal -->
+    <div
+      v-if="grpcModalOpen"
+      class="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4"
+    >
+      <div class="bg-card text-card-foreground border rounded-2xl w-full max-w-md shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+        <div class="p-5 border-b flex items-center justify-between bg-muted/30">
+          <div>
+            <h3 class="text-base font-bold flex items-center gap-2">
+              <Icon icon="carbon:flash" class="w-5 h-5 text-emerald-500" />
+              Configure gRPC Dial-Out
+            </h3>
+            <p class="text-xs text-muted-foreground mt-0.5">
+              Target collector server for streaming switch telemetry
+            </p>
+          </div>
+          <button @click="grpcModalOpen = false" class="text-muted-foreground hover:text-foreground">
+            <Icon icon="lucide:x" class="w-5 h-5" />
+          </button>
+        </div>
+
+        <div class="p-5 space-y-4 text-xs">
+          <div v-if="sw.grpc_configured_ip" class="p-3 bg-muted/50 border rounded-lg space-y-1">
+            <div class="font-semibold text-foreground">Current Switch Setting:</div>
+            <div class="font-mono text-muted-foreground">
+              Dial-out to: <strong>{{ sw.grpc_configured_ip }}:{{ sw.grpc_configured_port || 50051 }}</strong>
+            </div>
+            <div v-if="sw.grpc_ip_mismatch" class="text-rose-600 font-medium">
+              ⚠ Mismatch with this server's IP ({{ sw.grpc_expected_ip }})
+            </div>
+          </div>
+
+          <div class="space-y-3">
+            <div>
+              <label class="text-xs font-semibold block mb-1">
+                Collector Server IP <span class="text-[10px] text-primary">(.env detected)</span>
+              </label>
+              <Input
+                v-model="grpcServerIp"
+                placeholder="10.23.9.10"
+                class="font-mono text-xs"
+                required
+              />
+            </div>
+            <div>
+              <label class="text-xs font-semibold block mb-1">Collector Server Port</label>
+              <Input
+                v-model="grpcServerPort"
+                type="number"
+                placeholder="50051"
+                class="font-mono text-xs"
+                required
+              />
+            </div>
+          </div>
+
+          <p class="text-muted-foreground leading-relaxed text-[11px]">
+            This will connect to <strong>{{ sw.hostname || sw.mgmt_ip }}</strong> via SSH and configure the gRPC dial-out subscription to push real-time interface, optical, and LLDP metrics to this address.
+          </p>
+        </div>
+
+        <div class="p-4 border-t flex items-center justify-end gap-2 bg-muted/30">
+          <Button variant="outline" size="sm" @click="grpcModalOpen = false">
+            Cancel
+          </Button>
+          <Button
+            size="sm"
+            class="bg-emerald-600 hover:bg-emerald-700 text-white font-medium"
+            @click="confirmDeployGrpc"
+          >
+            <Icon icon="carbon:flash" class="w-3.5 h-3.5 mr-1.5" />
+            Deploy to Switch
           </Button>
         </div>
       </div>

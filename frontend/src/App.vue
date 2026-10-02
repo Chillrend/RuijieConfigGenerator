@@ -9,6 +9,7 @@ const router = useRouter()
 const navLinks = [
   { name: 'Provision Switch', path: '/' },
   { name: 'Fleet Management', path: '/fleet' },
+  { name: 'Scan Code', path: '/scanner' },
   { name: 'Deployments History', path: '/history' }
 ]
 

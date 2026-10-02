@@ -9,6 +9,49 @@ import { getRedis } from '../lib/redis.js';
 
 const router = express.Router();
 
+// Helper to inspect gRPC configuration and detect collector IP mismatches
+function inspectGrpcConfig(rawConfig) {
+  const expectedIp = process.env.GRPC_COLLECTOR_IP || '10.23.9.10';
+  const expectedPort = parseInt(process.env.GRPC_COLLECTOR_PORT || '50051', 10);
+  if (!rawConfig || typeof rawConfig !== 'string') {
+    return {
+      configured: false,
+      configuredIp: null,
+      configuredPort: null,
+      expectedIp,
+      expectedPort,
+      ipMismatch: false
+    };
+  }
+
+  const hasGrpc = /(?:^|\n)\s*grpc\b[\s\S]*?(?:destination-group|subscription)\b/i.test(rawConfig);
+  if (!hasGrpc) {
+    return {
+      configured: false,
+      configuredIp: null,
+      configuredPort: null,
+      expectedIp,
+      expectedPort,
+      ipMismatch: false
+    };
+  }
+
+  // Extract destination IP & port from destination-group
+  const destMatch = rawConfig.match(/destination-group\s+\S+[\s\S]*?\bip\s+([0-9.]+)(?:\s+port\s+(\d+))?/i);
+  const configuredIp = destMatch ? destMatch[1] : null;
+  const configuredPort = destMatch && destMatch[2] ? parseInt(destMatch[2], 10) : 50051;
+  const ipMismatch = !!(configuredIp && configuredIp !== expectedIp);
+
+  return {
+    configured: true,
+    configuredIp,
+    configuredPort,
+    expectedIp,
+    expectedPort,
+    ipMismatch
+  };
+}
+
 // Disable HTTP caching for all fleet API endpoints so browser always receives live data
 router.use((req, res, next) => {
   res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
@@ -52,7 +95,13 @@ router.get('/', async (req, res) => {
           }
         } catch (e) {}
 
+        // Fallback: If optical array is empty, derive from configured ports with transceivers
+        if (optical.length === 0 && ports.length > 0) {
+          optical = ports.filter(p => p.optical && p.optical.status !== 'absent').map(p => p.optical);
+        }
+
         const isPhysicalPort = (name) => /^(?:MTGigabitEthernet|MTGi|GigabitEthernet|Gi|TenGigabitEthernet|Te|TFGigabitEthernet|TF|TwentyFiveGigabitEthernet|25G|FortyGigabitEthernet|Fo|HundredGigabitEthernet|Hu|FastEthernet|Fa|AggregatePort|Ag)\s*\d/i.test(name || '');
+        optical = optical.filter(o => o.port && (isPhysicalPort(o.port) || isPhysicalPort(o.portShort)));
 
         let activePorts = 0;
         let totalPorts = ports.length;
@@ -68,8 +117,8 @@ router.get('/', async (req, res) => {
         const uplinkCount = lldp.filter(l => l.isUplink).length;
         const opticalWarnings = optical.filter(o => o.status === 'warning' || o.status === 'critical').length;
 
-        // Auto-check if gRPC was configured in running-config
-        const hasGrpcConfig = !!(sw.raw_config && /(?:^|\n)\s*grpc\b[\s\S]*?(?:destination-group|subscription)\b/i.test(sw.raw_config));
+        // Auto-check if gRPC was configured in running-config and inspect collector destination
+        const grpcInfo = inspectGrpcConfig(sw.raw_config);
 
         return {
           id: sw.id,
@@ -82,7 +131,12 @@ router.get('/', async (req, res) => {
           status: isLiveGrpc ? 'online' : (sw.status || 'unknown'),
           telemetry_mode: isLiveGrpc ? 'grpc' : (sw.telemetry_mode || 'ssh'),
           is_live_grpc: isLiveGrpc,
-          grpc_configured: hasGrpcConfig,
+          grpc_configured: grpcInfo.configured,
+          grpc_configured_ip: grpcInfo.configuredIp,
+          grpc_configured_port: grpcInfo.configuredPort,
+          grpc_expected_ip: grpcInfo.expectedIp,
+          grpc_expected_port: grpcInfo.expectedPort,
+          grpc_ip_mismatch: grpcInfo.ipMismatch,
           last_seen: lastLiveSeen || sw.last_seen,
           last_synced: sw.last_synced,
           uptime: sw.uptime,
@@ -219,7 +273,7 @@ router.get('/:id', async (req, res) => {
     } catch (e) {}
 
     const telemetrySource = liveTelemetry ? 'grpc' : (sw.telemetry_mode || 'ssh');
-    const grpcConfigured = !!(sw.raw_config && /(?:^|\n)\s*grpc\b[\s\S]*?(?:destination-group|subscription)\b/i.test(sw.raw_config));
+    const grpcInfo = inspectGrpcConfig(sw.raw_config);
 
     // If live telemetry from gRPC is available, overlay real-time states
     if (liveTelemetry) {
@@ -282,8 +336,12 @@ router.get('/:id', async (req, res) => {
         const liveIf = liveIfMap.get(p.name) || liveIfMap.get(p.shortName);
         if (liveIf) {
           p.operStatus = liveIf.operStatus || p.operStatus;
-          p.speed = liveIf.speed || p.speed;
-          p.duplex = liveIf.duplex || p.duplex;
+          if (liveIf.speed && liveIf.speed.toLowerCase() !== 'auto') {
+            p.speed = liveIf.speed;
+          }
+          if (liveIf.duplex && liveIf.duplex.toLowerCase() !== 'auto') {
+            p.duplex = liveIf.duplex;
+          }
           if (liveIf.counters) p.counters = liveIf.counters;
         }
 
@@ -321,6 +379,13 @@ router.get('/:id', async (req, res) => {
       }
     });
 
+    // Fallback: If optical array is empty, collect from ports that have optical transceivers
+    if (optical.length === 0 && ports.length > 0) {
+      optical = ports.filter(p => p.optical && p.optical.status !== 'absent').map(p => p.optical);
+    }
+    // Filter out non-port hardware components (e.g. Slot 0, Chassis)
+    optical = optical.filter(o => o.port && (PORT_NAME_REGEX.test(o.port) || PORT_NAME_REGEX.test(o.portShort)));
+
     // Sanitize credentials
     const sanitized = {
       ...sw,
@@ -331,7 +396,12 @@ router.get('/:id', async (req, res) => {
       optical,
       hardware_template: hwTemplate,
       telemetry_source: telemetrySource,
-      grpc_configured: grpcConfigured,
+      grpc_configured: grpcInfo.configured,
+      grpc_configured_ip: grpcInfo.configuredIp,
+      grpc_configured_port: grpcInfo.configuredPort,
+      grpc_expected_ip: grpcInfo.expectedIp,
+      grpc_expected_port: grpcInfo.expectedPort,
+      grpc_ip_mismatch: grpcInfo.ipMismatch,
       status: liveTelemetry ? 'online' : (sw.status || 'unknown')
     };
 
@@ -459,6 +529,60 @@ router.get('/:id/optical-history', async (req, res) => {
   }
 });
 
+// Change switch hostname via SSH and update in DB
+router.post('/:id/hostname', async (req, res) => {
+  const { hostname } = req.body;
+  if (!hostname || !hostname.trim()) {
+    return res.status(400).json({ error: 'Hostname cannot be empty' });
+  }
+
+  const cleanHostname = hostname.trim();
+  if (!/^[a-zA-Z0-9_\-\.]+$/.test(cleanHostname)) {
+    return res.status(400).json({ error: 'Invalid hostname format (use letters, numbers, dashes, dots, underscores)' });
+  }
+
+  try {
+    const db = getDB();
+    const sw = await db.get('SELECT * FROM switches WHERE id = ?', [req.params.id]);
+    if (!sw) return res.status(404).json({ error: 'Switch not found' });
+
+    console.log(`[Hostname] Pushing new hostname "${cleanHostname}" to switch ${sw.mgmt_ip} via SSH...`);
+    const sshCommands = [
+      'configure terminal',
+      `hostname ${cleanHostname}`,
+      'end',
+      'write'
+    ];
+
+    const output = await runSshSession(
+      sw.mgmt_ip,
+      {
+        username: sw.admin_username || 'admin',
+        password: sw.admin_password || '',
+        enablePassword: sw.enable_password || sw.admin_password || '',
+        timeout: 15000
+      },
+      sshCommands
+    );
+
+    await db.run(
+      'UPDATE switches SET hostname = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+      [cleanHostname, req.params.id]
+    );
+
+    console.log(`[Hostname] Switch ${sw.mgmt_ip} hostname changed to "${cleanHostname}"`);
+    res.json({
+      success: true,
+      hostname: cleanHostname,
+      message: `Hostname changed to ${cleanHostname} on device and database.`,
+      output
+    });
+  } catch (err) {
+    console.error(`[Hostname] Failed to update hostname for switch ${req.params.id}:`, err.message);
+    res.status(500).json({ error: `SSH failed: ${err.message}` });
+  }
+});
+
 // Update switch metadata / credentials
 router.put('/:id', async (req, res) => {
   const { hostname, mgmt_ip, admin_username, admin_password, enable_password, inventory_tag } = req.body;
@@ -519,22 +643,40 @@ router.post('/global-config/deploy-grpc', async (req, res) => {
       const placeholders = switchIds.map(() => '?').join(',');
       switches = await db.all(`SELECT * FROM switches WHERE id IN (${placeholders})`, switchIds);
     } else {
-      switches = await db.all('SELECT * FROM switches');
+      // Only target switches that are currently online (skip offline devices)
+      switches = await db.all("SELECT * FROM switches WHERE status = 'online'");
     }
 
-    console.log(`[Deploy gRPC] >>> Initiating gRPC dial-out deployment for ${switches.length} switches (collector: ${serverIp}:${serverPort})...`);
+    if (switches.length === 0) {
+      return res.json({
+        success: true,
+        total: 0,
+        successful: 0,
+        failed: 0,
+        message: 'No online switches found to configure.',
+        results: []
+      });
+    }
+
+    console.log(`[Deploy gRPC] >>> Initiating gRPC dial-out deployment for ${switches.length} online switches (collector: ${serverIp}:${serverPort})...`);
 
     const grpcCommands = [
       'configure terminal',
       'grpc',
+      // Clean up previous telemetry blocks to prevent stale or duplicate paths
+      ' no subscription FLEET_STREAM',
+      ' no destination-group FLEET_BACKEND',
+      ' no sensor-group FAST_METRICS',
+      ' no sensor-group SLOW_METRICS',
       ' server port 50052',
       ' rpc gnmi enable',
       ' sensor-group FAST_METRICS',
       '  sensor-path openconfig-interfaces:interfaces',
+      '  sensor-path rg-interfaces:interfaces',
       '  exit-sensor-group',
       ' sensor-group SLOW_METRICS',
       '  sensor-path openconfig-lldp:lldp',
-      '  sensor-path /openconfig-platform:components/component/transceiver',
+      '  sensor-path /openconfig-platform:components',
       '  exit-sensor-group',
       ' destination-group FLEET_BACKEND',
       `  ip ${serverIp} port ${serverPort}`,
@@ -551,8 +693,8 @@ router.post('/global-config/deploy-grpc', async (req, res) => {
     const results = [];
     let completedCount = 0;
 
-    // Run in parallel batches of 4 for speed without overwhelming switch/network
-    const CONCURRENCY = 4;
+    // Run in parallel batches of 6 for speed without overwhelming switch/network
+    const CONCURRENCY = 6;
     for (let i = 0; i < switches.length; i += CONCURRENCY) {
       const batch = switches.slice(i, i + CONCURRENCY);
       await Promise.all(
@@ -592,7 +734,7 @@ router.post('/global-config/deploy-grpc', async (req, res) => {
                 username: sw.admin_username || 'admin',
                 password: sw.admin_password || '',
                 enablePassword: sw.enable_password || sw.admin_password || '',
-                timeout: 15000
+                timeout: 35000
               },
               grpcCommands
             );

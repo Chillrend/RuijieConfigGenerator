@@ -3,6 +3,7 @@ import ProvisionerView from '../views/ProvisionerView.vue'
 import HistoryView from '../views/HistoryView.vue'
 import FleetListView from '../views/FleetListView.vue'
 import SwitchDetailView from '../views/SwitchDetailView.vue'
+import ScannerView from '../views/ScannerView.vue'
 import LoginView from '../views/LoginView.vue'
 import { authState, checkAuth } from '../lib/auth'
 
@@ -37,6 +38,12 @@ const router = createRouter({
       path: '/fleet/:id',
       name: 'switch-detail',
       component: SwitchDetailView,
+      meta: { requiresAuth: true }
+    },
+    {
+      path: '/scanner',
+      name: 'scanner',
+      component: ScannerView,
       meta: { requiresAuth: true }
     }
   ]

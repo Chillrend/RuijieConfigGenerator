@@ -47,6 +47,8 @@ const globalModalOpen = ref(false)
 const globalRunning = ref(false)
 const globalStatus = ref('')
 const globalResults = ref(null)
+const grpcServerIp = ref('')
+const grpcServerPort = ref(50051)
 
 let socket = null
 
@@ -79,27 +81,52 @@ const setupSocket = () => {
   })
 }
 
-const openGlobalModal = () => {
+const openGlobalModal = async () => {
   globalStatus.value = ''
   globalResults.value = null
   globalModalOpen.value = true
+  try {
+    const res = await fetch('/api/fleet/global-config/grpc-info', { credentials: 'include' })
+    if (res.ok) {
+      const data = await res.json()
+      grpcServerIp.value = data.collectorIp || ''
+      grpcServerPort.value = data.collectorPort || 50051
+    }
+  } catch (e) {}
 }
 
 const deployGrpcGlobal = async () => {
-  if (!confirm('Deploy gRPC Telemetry configuration to all switches? This connects via SSH and configures switches to push telemetry directly to this server on port 50051.')) return
+  const targetIp = grpcServerIp.value.trim()
+  const targetPort = parseInt(grpcServerPort.value, 10) || 50051
+  if (!targetIp) {
+    alert('Please enter a valid Collector Server IP')
+    return
+  }
+  const onlineCount = switches.value.filter(s => s.status === 'online').length
+  if (onlineCount === 0) {
+    alert('No online switches found in fleet. Offline switches are skipped.')
+    return
+  }
+  if (!confirm(`Deploy gRPC Telemetry configuration to ${onlineCount} online switches pointing to ${targetIp}:${targetPort}? Offline devices will be skipped.`)) return
   globalRunning.value = true
-  globalStatus.value = 'Connecting to switches via SSH and deploying gRPC telemetry configuration...'
+  globalStatus.value = `Connecting to ${onlineCount} online switches via SSH and deploying clean gRPC preset (collector: ${targetIp}:${targetPort})...`
   globalResults.value = null
 
+  // Timeout scales with fleet size: minimum 3 minutes, up to 10+ minutes for 50+ switches
+  const timeoutMs = Math.max(180000, onlineCount * 25000)
+  const timeoutSec = Math.round(timeoutMs / 1000)
   const controller = new AbortController()
-  const timeoutId = setTimeout(() => controller.abort(), 60000)
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
 
   try {
     const res = await fetch('/api/fleet/global-config/deploy-grpc', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
-      body: JSON.stringify({}),
+      body: JSON.stringify({
+        serverIp: targetIp,
+        serverPort: targetPort
+      }),
       signal: controller.signal
     })
     clearTimeout(timeoutId)
@@ -109,7 +136,7 @@ const deployGrpcGlobal = async () => {
     globalStatus.value = `Completed: ${data.successful} switches configured successfully, ${data.failed} failed.`
     await fetchFleet()
   } catch (err) {
-    globalStatus.value = `Error: ${err.name === 'AbortError' ? 'Deployment timed out after 60s' : err.message}`
+    globalStatus.value = `Error: ${err.name === 'AbortError' ? `Deployment timed out after ${timeoutSec}s` : err.message}`
   } finally {
     clearTimeout(timeoutId)
     globalRunning.value = false
@@ -282,6 +309,11 @@ const sortedSwitches = computed(() => {
   const order = sortOrder.value === 'asc' ? 1 : -1
 
   return list.sort((a, b) => {
+    // Online devices always sort first regardless of the selected sort key
+    const aOnline = a.status === 'online' ? 0 : 1
+    const bOnline = b.status === 'online' ? 0 : 1
+    if (aOnline !== bOnline) return aOnline - bOnline
+
     if (sortKey.value === 'ip') {
       return (ipToNumber(a.mgmt_ip) - ipToNumber(b.mgmt_ip)) * order
     }
@@ -363,6 +395,10 @@ onUnmounted(() => {
       </div>
 
       <div class="flex items-center gap-2.5">
+        <Button variant="outline" size="sm" @click="router.push('/scanner')">
+          <Icon icon="carbon:qr-code" class="w-4 h-4 mr-1.5 text-primary" />
+          Scan Datamatrix
+        </Button>
         <Button variant="secondary" size="sm" @click="openGlobalModal">
           <Icon icon="carbon:settings" class="w-4 h-4 mr-1.5" />
           Global Config
@@ -598,7 +634,15 @@ onUnmounted(() => {
                 <div class="flex items-center gap-1.5 flex-wrap">
                   <!-- Telemetry Mode Badge -->
                   <span
-                    v-if="sw.telemetry_mode === 'grpc' || sw.is_live_grpc"
+                    v-if="sw.grpc_ip_mismatch"
+                    class="inline-flex items-center gap-0.5 text-[10px] font-bold text-amber-600 bg-amber-500/10 border border-amber-500/30 px-1.5 py-0.2 rounded-full cursor-help"
+                    :title="`gRPC IP Mismatch: configured for ${sw.grpc_configured_ip}, but server expects ${sw.grpc_expected_ip}`"
+                  >
+                    <Icon icon="carbon:warning-filled" class="w-2.5 h-2.5 text-amber-500" />
+                    Wrong gRPC IP
+                  </span>
+                  <span
+                    v-else-if="sw.telemetry_mode === 'grpc' || sw.is_live_grpc"
                     class="inline-flex items-center gap-0.5 text-[10px] font-bold text-emerald-600 bg-emerald-500/10 border border-emerald-500/20 px-1.5 py-0.2 rounded-full"
                     title="Real-time telemetry streamed via gRPC dial-out to Redis"
                   >
@@ -858,20 +902,32 @@ onUnmounted(() => {
           </div>
 
           <!-- Action 1: Deploy gRPC -->
-          <div class="p-4 rounded-xl border bg-muted/20 space-y-2">
+          <div class="p-4 rounded-xl border bg-muted/20 space-y-3">
             <div class="flex items-center justify-between">
               <div class="font-semibold text-sm flex items-center gap-2">
                 <Icon icon="carbon:flash" class="w-4 h-4 text-emerald-500" />
-                Enable gRPC Telemetry on All Switches
+                Enable gRPC Telemetry on Online Switches
               </div>
-              <Button size="sm" class="bg-emerald-600 hover:bg-emerald-700 h-8 text-xs" :disabled="globalRunning" @click="deployGrpcGlobal">
+              <Button size="sm" class="bg-emerald-600 hover:bg-emerald-700 h-8 text-xs font-medium" :disabled="globalRunning" @click="deployGrpcGlobal">
                 <Icon icon="lucide:play" class="w-3.5 h-3.5 mr-1" />
                 Deploy Preset
               </Button>
             </div>
             <p class="text-xs text-muted-foreground leading-relaxed">
-              Injects gRPC dial-out streaming to the configured collector server on all eligible switches. Replaces heavy SSH scraping with real-time streaming to Redis. (Skips incompatible models like 10GT and RGOS 11.0).
+              Injects clean gRPC dial-out streaming to the configured collector server on all currently online switches (offline devices are automatically skipped). Replaces heavy SSH scraping with real-time streaming to Redis.
             </p>
+            <div class="grid grid-cols-3 gap-2.5 pt-1 border-t border-border/50">
+              <div class="col-span-2">
+                <label class="text-[11px] font-semibold text-muted-foreground block mb-1">
+                  Collector Server IP <span class="text-[10px] text-primary">(Detected from .env)</span>
+                </label>
+                <Input v-model="grpcServerIp" placeholder="10.23.9.10" class="h-8 text-xs font-mono" />
+              </div>
+              <div>
+                <label class="text-[11px] font-semibold text-muted-foreground block mb-1">Port</label>
+                <Input v-model="grpcServerPort" type="number" placeholder="50051" class="h-8 text-xs font-mono" />
+              </div>
+            </div>
           </div>
 
           <!-- Action 2: Daily Running Config Backup -->

@@ -131,7 +131,7 @@ async function publishSwitchTelemetry(ip) {
     try {
       const db = getDB();
       if (db) {
-        const sw = await db.get('SELECT ports_json FROM switches WHERE mgmt_ip = ?', [ip]);
+        const sw = await db.get('SELECT ports_json, lldp_json, optical_json FROM switches WHERE mgmt_ip = ?', [ip]);
         let existingPorts = [];
         try { existingPorts = JSON.parse(sw?.ports_json || '[]'); } catch (e) {}
 
@@ -141,8 +141,12 @@ async function publishSwitchTelemetry(ip) {
             const liveIf = state.interfaces.get(p.name) || state.interfaces.get(p.shortName);
             if (liveIf) {
               p.operStatus = liveIf.operStatus || p.operStatus;
-              p.speed = liveIf.speed || p.speed;
-              p.duplex = liveIf.duplex || p.duplex;
+              if (liveIf.speed && liveIf.speed.toLowerCase() !== 'auto') {
+                p.speed = liveIf.speed;
+              }
+              if (liveIf.duplex && liveIf.duplex.toLowerCase() !== 'auto') {
+                p.duplex = liveIf.duplex;
+              }
             }
             const livePoe = state.poe.get(p.name) || state.poe.get(p.shortName);
             if (livePoe) {
@@ -153,6 +157,12 @@ async function publishSwitchTelemetry(ip) {
           }
         } else if (state.interfaces.size > 0) {
           existingPorts = Array.from(state.interfaces.values());
+        }
+
+        const finalLldp = state.lldp.size > 0 ? Array.from(state.lldp.values()) : (sw?.lldp_json ? JSON.parse(sw.lldp_json) : []);
+        let finalOptical = state.optical.size > 0 ? Array.from(state.optical.values()) : (sw?.optical_json ? JSON.parse(sw.optical_json) : []);
+        if (finalOptical.length === 0 && existingPorts.length > 0) {
+          finalOptical = existingPorts.filter(p => p.optical && p.optical.status !== 'absent').map(p => p.optical);
         }
 
         await db.run(
@@ -168,8 +178,8 @@ async function publishSwitchTelemetry(ip) {
            WHERE mgmt_ip = ?`,
           [
             JSON.stringify(existingPorts),
-            JSON.stringify(Array.from(state.lldp.values())),
-            JSON.stringify(Array.from(state.optical.values())),
+            JSON.stringify(finalLldp),
+            JSON.stringify(finalOptical),
             ip
           ]
         );
@@ -187,24 +197,93 @@ function handleOpenConfigData(ip, pathName, json) {
   const state = getSwitchState(ip);
   state.last_seen = new Date().toISOString();
 
-  // 1. Interfaces
-  if (pathName.includes('interfaces') && json.interface && Array.isArray(json.interface)) {
-    for (const iface of json.interface) {
+  // 1. Interfaces (supports both openconfig-interfaces and rg-interfaces with PoE & LLDP augmentations)
+  const rawIfList = json['interface'] || json['rg-interfaces:interfaces']?.interface || json['interfaces']?.interface;
+  if (pathName.includes('interfaces') && rawIfList && Array.isArray(rawIfList)) {
+    for (const iface of rawIfList) {
       if (!iface.name || /^vlan|^vl\d+|^lo|^null/i.test(iface.name)) continue;
       const rawName = iface.name;
       const norm = normalizePortName(rawName);
       const short = shortPortName(norm);
-      const operStatus = (iface.state?.['oper-status'] || 'DOWN').toLowerCase();
-      const adminStatus = (iface.state?.['admin-status'] || 'UP').toUpperCase();
-      const speed = mapSpeedString(iface.ethernet?.state?.['port-speed'] || iface.ethernet?.config?.['port-speed']);
-      const duplex = iface.ethernet?.config?.['duplex-mode'] || 'Full';
-      const description = iface.config?.description || iface.state?.description || '';
-      const switchedVlan = iface.ethernet?.['switched-vlan']?.config || {};
-      const mode = (switchedVlan['interface-mode'] || 'access').toLowerCase();
-      const vlan = String(switchedVlan['native-vlan'] || '1');
-      const allowed_vlans = Array.isArray(switchedVlan['trunk-vlans']) ? switchedVlan['trunk-vlans'].join(',') : 'all';
 
-      const counters = iface.state?.counters || {};
+      // Extract PoE augmentation if present (rg-poe inside rg-interfaces)
+      const poeStateContainer = iface['rg-poe:poe-port-state'] || iface['poe-port-state'];
+      if (poeStateContainer) {
+        const poeState = Array.isArray(poeStateContainer.state) ? poeStateContainer.state[0] : (poeStateContainer.state || poeStateContainer);
+        if (poeState) {
+          const milliwatt = parseFloat(poeState['consumption-power']) || 0;
+          const watt = Math.round(milliwatt / 100) / 10;
+          const isEnabled = poeState.enable !== false;
+          state.poe.set(norm, {
+            port: norm,
+            portShort: short,
+            powerControl: isEnabled ? 'enable' : 'disable',
+            powerStatus: watt > 0 ? 'on' : (isEnabled ? 'enable' : 'off'),
+            currPower: `${watt}W`,
+            watt,
+            milliwatt
+          });
+        }
+      }
+
+      // Extract LLDP augmentation if present in rg-interfaces
+      const lldpPort = iface['rg-lldp:lldp-port'] || iface['lldp-port'];
+      if (lldpPort?.neighbors?.neighbor) {
+        const nList = Array.isArray(lldpPort.neighbors.neighbor) ? lldpPort.neighbors.neighbor : [lldpPort.neighbors.neighbor];
+        for (const n of nList) {
+          const remoteDevice = (n['system-name'] || n['system-description'] || '').split('\n')[0].trim();
+          const remotePort = n['port-id'] || n['port-description'] || '';
+          const isUplink = /TenGigabit|TwentyFive|Forty|Hundred|TF|switch|core|agg/i.test(remoteDevice) ||
+                           /Te|TF|25G|40G|100G/i.test(rawName);
+          state.lldp.set(norm, {
+            localPort: norm,
+            localPortShort: short,
+            remoteDevice: remoteDevice || 'Unknown Device',
+            remotePort,
+            remotePortDesc: n['port-description'] || '',
+            managementIp: n['ip'] || '',
+            isUplink
+          });
+        }
+      }
+
+      const existingIf = state.interfaces.get(norm);
+
+      // Only openconfig-interfaces provides true link physical status in iface.state['oper-status'].
+      // rg-interfaces has iface.enable (administrative status), which must NOT overwrite link oper-status!
+      let operStatus = existingIf?.operStatus || 'down';
+      if (iface.state?.['oper-status']) {
+        operStatus = iface.state['oper-status'].toLowerCase();
+      }
+
+      const adminStatus = (iface.state?.['admin-status'] || (iface.enable !== false ? 'UP' : 'DOWN')).toUpperCase();
+
+      // Negotiated link speed comes from openconfig-interfaces ethernet state.
+      // rg-interfaces sends configured 'speed: auto', which must NEVER overwrite a negotiated link speed!
+      let speed = existingIf?.speed || 'Auto';
+      const ocSpeed = iface.ethernet?.state?.['port-speed'] || iface.ethernet?.config?.['port-speed'];
+      if (ocSpeed) {
+        speed = mapSpeedString(ocSpeed);
+      } else if (iface.speed && iface.speed.toLowerCase() !== 'auto') {
+        speed = mapSpeedString(iface.speed);
+      }
+
+      // Duplex: operational duplex from openconfig ethernet state/config; rg-interfaces sends 'auto'
+      let duplex = existingIf?.duplex || 'Full';
+      const ocDuplex = iface.ethernet?.config?.['duplex-mode'] || iface.ethernet?.state?.['duplex-mode'];
+      if (ocDuplex) {
+        duplex = ocDuplex;
+      } else if (iface.duplex && iface.duplex.toLowerCase() !== 'auto') {
+        duplex = iface.duplex;
+      }
+
+      const description = iface.config?.description || iface.state?.description || iface.description || existingIf?.description || '';
+      const switchedVlan = iface.ethernet?.['switched-vlan']?.config || {};
+      const mode = (switchedVlan['interface-mode'] || (iface['rg-bridge:swport']?.mode === 1 ? 'access' : (existingIf?.mode || 'access'))).toLowerCase();
+      const vlan = String(switchedVlan['native-vlan'] || iface['rg-bridge:swport']?.pvid || existingIf?.vlan || '1');
+      const allowed_vlans = Array.isArray(switchedVlan['trunk-vlans']) ? switchedVlan['trunk-vlans'].join(',') : (existingIf?.allowed_vlans || 'all');
+
+      const counters = iface.state?.counters || existingIf?.counters || {};
 
       state.interfaces.set(norm, {
         name: norm,
@@ -234,25 +313,85 @@ function handleOpenConfigData(ip, pathName, json) {
 
   // 2. Optical transceiver components
   if (pathName.includes('components') || pathName.includes('transceiver')) {
-    // Might be single component object or array in openconfig-platform:components
-    const components = json['component'] || (json['state'] && [json]) || [];
-    for (const comp of (Array.isArray(components) ? components : [components])) {
+    const rawComps = json['openconfig-platform:components']?.component ||
+                     json['components']?.component ||
+                     json['component'] ||
+                     (json['state'] && [json]) ||
+                     (json['name'] && [json]) || [];
+    const components = Array.isArray(rawComps) ? rawComps : [rawComps];
+    const PORT_NAME_REGEX = /^(?:MTGigabitEthernet|MTGi|GigabitEthernet|Gi|TenGigabitEthernet|Te|TFGigabitEthernet|TF|TwentyFiveGigabitEthernet|25G|FortyGigabitEthernet|Fo|HundredGigabitEthernet|Hu|FastEthernet|Fa|AggregatePort|Ag)\s*\d/i;
+
+    for (const comp of components) {
       const portName = comp.name || (comp.config && comp.config.name);
-      const trans = comp.transceiver?.state || comp.state;
-      if (!trans || !portName) continue;
+      if (!portName) continue;
 
       const norm = normalizePortName(portName);
       const short = shortPortName(norm);
 
-      const rx = trans['input-power']?.instant !== undefined ? parseFloat(trans['input-power'].instant) : null;
-      const tx = trans['output-power']?.instant !== undefined ? parseFloat(trans['output-power'].instant) : null;
-      const temp = comp.state?.temperature?.instant !== undefined ? parseFloat(comp.state.temperature.instant) : null;
+      // Only process physical port components; skip Slot 0, Chassis, FAN, Power Supply, etc.
+      if (!PORT_NAME_REGEX.test(portName) && !PORT_NAME_REGEX.test(norm) && !PORT_NAME_REGEX.test(short)) {
+        continue;
+      }
+
+      const trans = comp.transceiver?.state || comp.transceiver;
+      const vendorStr = (trans?.vendor || '').trim();
+      const partStr = (trans?.['vendor-part'] || trans?.partNumber || '').trim();
+      const snStr = (trans?.['serial-no'] || trans?.serialNumber || '').trim();
+      const formFactor = (trans?.['form-factor'] || '').trim();
+
+      // Transceiver is only present if it has manufacturer identification (vendor/part/SN/form-factor)
+      // or valid non-zero optical power readings. Otherwise it is an empty/unpopulated SFP cage.
+      const hasModule = trans && (
+        vendorStr !== '' ||
+        partStr !== '' ||
+        snStr !== '' ||
+        (formFactor !== '' && formFactor !== 'UNKNOWN') ||
+        (trans['input-power']?.instant !== undefined && trans['input-power'].instant !== null && !isNaN(parseFloat(trans['input-power'].instant)))
+      );
+
+      if (!hasModule) {
+        // Module absent from cage
+        state.optical.set(norm, {
+          port: norm,
+          portShort: short,
+          vendor: '',
+          partNumber: '',
+          transceiverType: '',
+          wavelength: '',
+          serialNumber: '',
+          temperature: null,
+          voltage: null,
+          biasCurrent: null,
+          rxPower: null,
+          txPower: null,
+          status: 'absent'
+        });
+        continue;
+      }
+
+      const rx = trans['input-power']?.instant !== undefined ? parseFloat(trans['input-power'].instant) :
+                 (trans['input-power'] !== undefined && typeof trans['input-power'] === 'number' ? trans['input-power'] : null);
+      const tx = trans['output-power']?.instant !== undefined ? parseFloat(trans['output-power'].instant) :
+                 (trans['output-power'] !== undefined && typeof trans['output-power'] === 'number' ? trans['output-power'] : null);
+      const temp = comp.state?.temperature?.instant !== undefined ? parseFloat(comp.state.temperature.instant) :
+                   (trans.temperature?.instant !== undefined ? parseFloat(trans.temperature.instant) : null);
       const volt = trans.voltage?.instant !== undefined ? parseFloat(trans.voltage.instant) : null;
       const bias = trans['laser-bias-current']?.instant !== undefined ? parseFloat(trans['laser-bias-current'].instant) : null;
       const vendor = (trans.vendor || '').trim();
-      const partNumber = (trans['vendor-part'] || '').trim();
-      const serialNumber = (trans['serial-no'] || '').trim();
-      const status = rx === null ? 'no_signal' : getOpticalHealth(rx);
+      const partNumber = (trans['vendor-part'] || trans.partNumber || '').trim();
+      const serialNumber = (trans['serial-no'] || trans.serialNumber || '').trim();
+
+      // If module is inserted but provides no optical metrics (rx, tx, temp, volt), DDM is unsupported
+      let status = 'normal';
+      const hasDdmMetrics = (rx !== null && !isNaN(rx)) || (tx !== null && !isNaN(tx)) || (temp !== null && !isNaN(temp)) || (volt !== null && !isNaN(volt)) || (bias !== null && !isNaN(bias));
+
+      if (!hasDdmMetrics) {
+        status = 'no_ddm';
+      } else if (rx === null || isNaN(rx)) {
+        status = 'no_signal';
+      } else {
+        status = getOpticalHealth(rx);
+      }
 
       const opticalItem = {
         port: norm,

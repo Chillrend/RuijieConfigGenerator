@@ -65,33 +65,37 @@ export async function pollSwitch(switchId) {
   // 2. Execute SSH inspection commands
   try {
     const redis = getRedis();
-    let hasLiveTelemetry = false;
+    let liveTelemetry = null;
     try {
       const liveRaw = await redis.get(`sw:${sw.mgmt_ip}:telemetry`);
       if (liveRaw) {
-        const live = JSON.parse(liveRaw);
-        if (Array.isArray(live.interfaces) && live.interfaces.length > 0) {
-          hasLiveTelemetry = true;
-        }
+        liveTelemetry = JSON.parse(liveRaw);
       }
     } catch (e) {}
 
-    // Only skip SSH metric commands if gRPC is CONFIRMED actively streaming live interface telemetry!
+    const hasLiveTelemetry = !!(liveTelemetry && Array.isArray(liveTelemetry.interfaces) && liveTelemetry.interfaces.length > 0);
+    const hasLiveOptical = !!(liveTelemetry && Array.isArray(liveTelemetry.optical) && liveTelemetry.optical.length > 0);
+    const hasLivePoe = !!(liveTelemetry && Array.isArray(liveTelemetry.poe) && liveTelemetry.poe.length > 0);
+    const hasLiveLldp = !!(liveTelemetry && Array.isArray(liveTelemetry.lldp) && liveTelemetry.lldp.length > 0);
+
     const isGrpcActive = sw.telemetry_mode === 'grpc' && hasLiveTelemetry;
-    const commands = isGrpcActive
-      ? [
-          'show version',
-          'show running-config'
-        ]
-      : [
-          'show version',
-          'show interfaces status',
-          'show interfaces transceiver',
-          'show interfaces transceiver manuinfo',
-          'show poe interfaces status',
-          'show lldp neighbors detail',
-          'show running-config'
-        ];
+
+    // Adaptive commands: minimize switch CPU & SSH encryption load
+    // If gRPC actively delivers optical, PoE, or LLDP, skip their heavy SSH scraping!
+    const commands = ['show version'];
+    if (!isGrpcActive) {
+      commands.push('show interfaces status');
+    }
+    if (!isGrpcActive || !hasLiveOptical) {
+      commands.push('show interfaces transceiver', 'show interfaces transceiver manuinfo');
+    }
+    if (!isGrpcActive || !hasLivePoe) {
+      commands.push('show poe interfaces status');
+    }
+    if (!isGrpcActive || !hasLiveLldp) {
+      commands.push('show lldp neighbors detail');
+    }
+    commands.push('show running-config');
 
     const rawOutput = await runSshSession(
       sw.mgmt_ip,
@@ -108,17 +112,17 @@ export async function pollSwitch(switchId) {
     const rawVersion = extractCommandOutput(rawOutput, 'show version');
     const rawConfig = extractCommandOutput(rawOutput, 'show running-config');
     const rawStatus = !isGrpcActive ? extractCommandOutput(rawOutput, 'show interfaces status') : '';
-    const rawTrans = !isGrpcActive ? extractCommandOutput(rawOutput, 'show interfaces transceiver') : '';
-    const rawManu = !isGrpcActive ? extractCommandOutput(rawOutput, 'show interfaces transceiver manuinfo') : '';
-    const rawPoe = !isGrpcActive ? extractCommandOutput(rawOutput, 'show poe interfaces status') : '';
-    const rawLldp = !isGrpcActive ? extractCommandOutput(rawOutput, 'show lldp neighbors detail') : '';
+    const rawTrans = (!isGrpcActive || !hasLiveOptical) ? extractCommandOutput(rawOutput, 'show interfaces transceiver') : '';
+    const rawManu = (!isGrpcActive || !hasLiveOptical) ? extractCommandOutput(rawOutput, 'show interfaces transceiver manuinfo') : '';
+    const rawPoe = (!isGrpcActive || !hasLivePoe) ? extractCommandOutput(rawOutput, 'show poe interfaces status') : '';
+    const rawLldp = (!isGrpcActive || !hasLiveLldp) ? extractCommandOutput(rawOutput, 'show lldp neighbors detail') : '';
 
     const ver = parseShowVersion(rawVersion || rawOutput);
     const ifStatuses = !isGrpcActive ? parseInterfacesStatus(rawStatus || rawOutput) : [];
-    const manuinfo = !isGrpcActive ? parseTransceiverManuinfo(rawManu || rawOutput) : new Map();
-    const ddm = !isGrpcActive ? parseTransceiverDDM(rawTrans || rawOutput, manuinfo) : [];
-    const poeStatuses = !isGrpcActive ? parsePoeInterfacesStatus(rawPoe || rawOutput) : [];
-    const lldp = !isGrpcActive ? parseLLDPNeighbors(rawLldp || rawOutput) : (sw.lldp_json ? JSON.parse(sw.lldp_json) : []);
+    const manuinfo = (!isGrpcActive || !hasLiveOptical) ? parseTransceiverManuinfo(rawManu || rawOutput) : new Map();
+    const ddm = (!isGrpcActive || !hasLiveOptical) ? parseTransceiverDDM(rawTrans || rawOutput, manuinfo) : (liveTelemetry?.optical || []);
+    const poeStatuses = (!isGrpcActive || !hasLivePoe) ? parsePoeInterfacesStatus(rawPoe || rawOutput) : (liveTelemetry?.poe || []);
+    const lldp = (!isGrpcActive || !hasLiveLldp) ? parseLLDPNeighbors(rawLldp || rawOutput) : (liveTelemetry?.lldp || (sw.lldp_json ? JSON.parse(sw.lldp_json) : []));
     const configParsed = parseRunningConfig(rawConfig || rawOutput);
 
     // Switch is in gRPC mode only if live telemetry is confirmed active; otherwise falls back to SSH
@@ -156,6 +160,16 @@ export async function pollSwitch(switchId) {
       lldpMap.set(n.localPortShort, n);
     }
 
+    // Build map of previous port states to prevent transient empty scrapes from wiping data
+    const prevPortMap = new Map();
+    try {
+      const prevPorts = sw.ports_json ? JSON.parse(sw.ports_json) : [];
+      for (const p of prevPorts) {
+        prevPortMap.set(p.name, p);
+        prevPortMap.set(p.shortName, p);
+      }
+    } catch (e) {}
+
     // Combine configured interfaces with real-time operational status
     const combinedPorts = [];
     const configuredInterfaces = Object.keys(configParsed.interfaces).filter(name => !/^vlan/i.test(name));
@@ -168,10 +182,11 @@ export async function pollSwitch(switchId) {
         const match = name.match(/\/(\d+)$/);
         const portNum = match ? parseInt(match[1], 10) : combinedPorts.length + 1;
 
+        const prevP = prevPortMap.get(name) || prevPortMap.get(shortName);
         const liveStatus = statusMap.get(name) || statusMap.get(shortName) || statusMap.get(String(portNum)) || {};
-        const liveDdm = ddmMap.get(name) || ddmMap.get(shortName) || null;
-        const liveLldp = lldpMap.get(name) || lldpMap.get(shortName) || null;
-        const livePoe = poeMap.get(name) || poeMap.get(shortName) || poeMap.get(String(portNum)) || null;
+        const liveDdm = ddmMap.get(name) || ddmMap.get(shortName) || prevP?.optical || null;
+        const liveLldp = lldpMap.get(name) || lldpMap.get(shortName) || (prevP?.uplinkNeighbor ? { remoteDevice: prevP.uplinkNeighbor, remotePort: prevP.uplinkNeighborPort, isUplink: prevP.isUplink } : null);
+        const livePoe = poeMap.get(name) || poeMap.get(shortName) || poeMap.get(String(portNum)) || (prevP?.poeStatus && prevP.poeStatus !== 'off' ? { powerStatus: prevP.poeStatus, watt: prevP.poePower, currPower: prevP.poePowerStr, pdClass: prevP.poePdClass, voltage: prevP.poeVoltage, powerControl: prevP.poeMode } : null);
 
         const isUplinkPort = liveLldp?.isUplink || /TenGigabit|TwentyFive|Forty|Hundred|TF/i.test(name);
         const effectivePoeMode = portConf.poeMode !== 'default'
@@ -213,9 +228,10 @@ export async function pollSwitch(switchId) {
     } else {
       // Fallback: build from interface status table
       for (const st of ifStatuses) {
-        const liveDdm = ddmMap.get(st.port) || ddmMap.get(st.portShort) || null;
-        const liveLldp = lldpMap.get(st.port) || lldpMap.get(st.portShort) || null;
-        const livePoe = poeMap.get(st.port) || poeMap.get(st.portShort) || null;
+        const prevP = prevPortMap.get(st.port) || prevPortMap.get(st.portShort);
+        const liveDdm = ddmMap.get(st.port) || ddmMap.get(st.portShort) || prevP?.optical || null;
+        const liveLldp = lldpMap.get(st.port) || lldpMap.get(st.portShort) || (prevP?.uplinkNeighbor ? { remoteDevice: prevP.uplinkNeighbor, remotePort: prevP.uplinkNeighborPort, isUplink: prevP.isUplink } : null);
+        const livePoe = poeMap.get(st.port) || poeMap.get(st.portShort) || (prevP?.poeStatus && prevP.poeStatus !== 'off' ? { powerStatus: prevP.poeStatus, watt: prevP.poePower, currPower: prevP.poePowerStr, pdClass: prevP.poePdClass, voltage: prevP.poeVoltage, powerControl: prevP.poeMode } : null);
         const match = st.port.match(/\/(\d+)$/);
         const portNum = match ? parseInt(match[1], 10) : combinedPorts.length + 1;
         const isUplinkPort = liveLldp?.isUplink || /TenGigabit|TwentyFive|Forty|Hundred|TF/i.test(st.port);
@@ -260,6 +276,9 @@ export async function pollSwitch(switchId) {
     const finalSerial = sw.serial_number || ver.serial || '';
     const finalMac = sw.mac_address || ver.mac || '';
 
+    const activeOptical = ddm.length > 0 ? ddm : (sw.optical_json ? JSON.parse(sw.optical_json) : []);
+    const gatheredOptical = activeOptical.length > 0 ? activeOptical : combinedPorts.filter(p => p.optical && p.optical.status !== 'absent').map(p => p.optical);
+
     await db.run(
       `UPDATE switches SET
         status = 'online',
@@ -287,7 +306,7 @@ export async function pollSwitch(switchId) {
         ver.version || sw.software_version || '',
         JSON.stringify(combinedPorts),
         JSON.stringify(lldp),
-        JSON.stringify(ddm.length > 0 ? ddm : (sw.optical_json ? JSON.parse(sw.optical_json) : [])),
+        JSON.stringify(gatheredOptical),
         rawConfig || rawOutput,
         finalTelemetryMode,
         switchId
@@ -295,8 +314,8 @@ export async function pollSwitch(switchId) {
     );
 
     // 5. Record optical DDM time-series metrics
-    if (ddm.length > 0) {
-      await recordOpticalMetrics(switchId, sw.hostname, ddm);
+    if (gatheredOptical.length > 0) {
+      await recordOpticalMetrics(switchId, sw.hostname, gatheredOptical);
     }
 
     console.log(`[Poller] Switch ${sw.hostname || sw.mgmt_ip} synced successfully. Ports: ${combinedPorts.length}, Uplinks: ${lldp.filter(x => x.isUplink).length}, Optics: ${ddm.length}`);

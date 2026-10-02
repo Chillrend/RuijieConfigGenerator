@@ -533,6 +533,19 @@ export function parseTransceiverDDM(output, manuinfo = null) {
         const manu = manuMap.get(norm) || manuMap.get(short) || {};
         const rx = parts[5 + offset] === 'NA' ? null : parseFloat(parts[5 + offset]);
         const tx = parts[4 + offset] === 'NA' ? null : parseFloat(parts[4 + offset]);
+        const temp = parseFloat(parts[1 + offset]) || null;
+        const volt = parseFloat(parts[2 + offset]) || null;
+        const bias = parseFloat(parts[3 + offset]) || null;
+        const hasDdm = (rx !== null && !isNaN(rx)) || (tx !== null && !isNaN(tx)) || temp !== null || volt !== null || bias !== null;
+        let status = 'normal';
+        if (!hasDdm) {
+          status = 'no_ddm';
+        } else if (rx === null || isNaN(rx)) {
+          status = 'no_signal';
+        } else {
+          status = getOpticalHealth(rx);
+        }
+
         results.push({
           port: norm,
           portShort: short,
@@ -541,12 +554,12 @@ export function parseTransceiverDDM(output, manuinfo = null) {
           transceiverType: '',
           wavelength: '',
           serialNumber: manu.serialNumber || '',
-          temperature: parseFloat(parts[1 + offset]) || null,
-          voltage: parseFloat(parts[2 + offset]) || null,
-          biasCurrent: parseFloat(parts[3 + offset]) || null,
+          temperature: temp,
+          voltage: volt,
+          biasCurrent: bias,
           txPower: tx,
           rxPower: rx,
-          status: rx === null ? 'no_signal' : getOpticalHealth(rx)
+          status
         });
       }
     }
