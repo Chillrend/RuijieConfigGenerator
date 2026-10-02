@@ -607,6 +607,19 @@ app.post('/api/generate-config', requireAuth, async (req, res) => {
   res.json({ configText, inventoryTag });
 });
 
+// ── SPA Fallback ────────────────────────────────────────────
+app.get('*', (req, res) => {
+  if (req.path.startsWith('/api')) {
+    return res.status(404).json({ error: 'API route not found' });
+  }
+  const indexPath = path.join(__dirname, 'public', 'index.html');
+  res.sendFile(indexPath, (err) => {
+    if (err && !res.headersSent) {
+      res.status(404).send('Frontend build not found');
+    }
+  });
+});
+
 // ────────────────────────────────────────────────────────────
 // 4. Start Server & Real-time WebSockets
 // ────────────────────────────────────────────────────────────
