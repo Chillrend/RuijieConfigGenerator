@@ -6,6 +6,7 @@ import { Icon } from '@iconify/vue'
 import { Input } from '../components/ui/input'
 import { Button } from '../components/ui/button'
 import { Badge } from '../components/ui/badge'
+import EditSwitchModal from '../components/EditSwitchModal.vue'
 
 const router = useRouter()
 const switches = ref([])
@@ -15,6 +16,45 @@ const syncingAll = ref(false)
 const syncingId = ref(null)
 const searchQuery = ref('')
 const errorMsg = ref('')
+
+// Edit Switch Modal State
+const editModalOpen = ref(false)
+const switchBeingEdited = ref(null)
+
+const openEditModal = (sw) => {
+  switchBeingEdited.value = sw
+  editModalOpen.value = true
+}
+
+const handleSwitchSaved = (updated) => {
+  const idx = switches.value.findIndex(s => s.id === updated.id)
+  if (idx !== -1) {
+    switches.value[idx] = { ...switches.value[idx], ...updated }
+  }
+  fetchFleetSilent()
+}
+
+const handleSwitchDeleted = (deletedId) => {
+  switches.value = switches.value.filter(s => s.id !== deletedId)
+}
+
+const deleteSwitchDirect = async (sw) => {
+  const hostLabel = sw.hostname || sw.mgmt_ip || 'this switch'
+  if (!confirm(`Are you sure you want to remove ${hostLabel} (${sw.mgmt_ip}) from fleet management?`)) {
+    return
+  }
+  try {
+    const res = await fetch(`/api/fleet/${sw.id}`, {
+      method: 'DELETE',
+      credentials: 'include'
+    })
+    const data = await res.json()
+    if (!res.ok) throw new Error(data.error || 'Failed to delete switch')
+    handleSwitchDeleted(sw.id)
+  } catch (err) {
+    alert(err.message)
+  }
+}
 
 // Sorting & Pagination State
 const sortKey = ref('ip') // 'ip' | 'hostname' | 'status' | 'ports' | 'optical'
@@ -677,6 +717,15 @@ onUnmounted(() => {
                     variant="ghost"
                     size="icon"
                     class="h-7 w-7 text-muted-foreground hover:text-foreground"
+                    title="Edit switch profile"
+                    @click.stop="openEditModal(sw)"
+                  >
+                    <Icon icon="carbon:edit" class="w-3.5 h-3.5" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    class="h-7 w-7 text-muted-foreground hover:text-foreground"
                     title="Poll switch via SSH"
                     :disabled="syncingId === sw.id"
                     @click="syncSwitch(sw.id, $event)"
@@ -694,6 +743,15 @@ onUnmounted(() => {
                     @click="router.push(`/fleet/${sw.id}`)"
                   >
                     Manage
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    class="h-7 w-7 text-muted-foreground hover:text-destructive hover:bg-destructive/10"
+                    title="Delete switch from fleet"
+                    @click.stop="deleteSwitchDirect(sw)"
+                  >
+                    <Icon icon="lucide:trash-2" class="w-3.5 h-3.5" />
                   </Button>
                 </div>
               </td>
@@ -999,5 +1057,14 @@ onUnmounted(() => {
         </div>
       </div>
     </div>
+
+    <!-- Edit Switch Profile Modal -->
+    <EditSwitchModal
+      v-model:open="editModalOpen"
+      :switch-data="switchBeingEdited"
+      :hardware-models="hardwareModels"
+      @saved="handleSwitchSaved"
+      @deleted="handleSwitchDeleted"
+    />
   </div>
 </template>
