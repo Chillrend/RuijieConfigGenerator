@@ -85,9 +85,9 @@ const selectedPortsData = computed(() => {
 })
 
 const availableVlans = computed(() =>
-  vlanDatabase.value.filter(
-    (v) => !selectedVlans.value.some((sv) => sv.id === v.id)
-  )
+  vlanDatabase.value
+    .filter((v) => !selectedVlans.value.some((sv) => Number(sv.id) === Number(v.id)))
+    .sort((a, b) => Number(a.id) - Number(b.id))
 )
 
 const configuredPorts = computed(() => {
@@ -232,6 +232,7 @@ function ensureVlanInSelected(vlanId, defaultName) {
     } else {
       selectedVlans.value.push({ id: Number(vlanId), name: defaultName })
     }
+    selectedVlans.value.sort((a, b) => Number(a.id) - Number(b.id))
   }
 }
 
@@ -285,8 +286,9 @@ function getPortName(port) {
 }
 
 function addVlan(vlan) {
-  if (!selectedVlans.value.some((v) => v.id === vlan.id)) {
+  if (!selectedVlans.value.some((v) => Number(v.id) === Number(vlan.id))) {
     selectedVlans.value.push({ ...vlan })
+    selectedVlans.value.sort((a, b) => Number(a.id) - Number(b.id))
   }
   vlanDropdownOpen.value = false
 }
@@ -497,7 +499,7 @@ async function loadDeploymentForEdit(id) {
     }
 
     if (payload.vlans && Array.isArray(payload.vlans)) {
-      selectedVlans.value = payload.vlans
+      selectedVlans.value = payload.vlans.sort((a, b) => Number(a.id) - Number(b.id))
     }
     if (payload.ports && Array.isArray(payload.ports)) {
       ports.value = payload.ports
@@ -543,9 +545,9 @@ onMounted(async () => {
     const res = await fetch('/api/setup', { credentials: 'include' })
     const data = await res.json()
     hardwareOptions.value = data.hardware || []
-    vlanDatabase.value = data.vlans || []
+    vlanDatabase.value = (data.vlans || []).sort((a, b) => Number(a.id) - Number(b.id))
     portProfiles.value = data.portProfiles || []
-    selectedVlans.value = [...(data.vlans || [])]
+    selectedVlans.value = [...vlanDatabase.value]
     buildPorts()
     if (route.query.edit) {
       await loadDeploymentForEdit(route.query.edit)

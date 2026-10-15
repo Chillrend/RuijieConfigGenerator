@@ -82,6 +82,9 @@ async function viewDeployment(id) {
     const res = await fetch(`/api/deployments/${id}`, { credentials: 'include' })
     const data = await res.json()
     data.parsedPayload = JSON.parse(data.config_payload)
+    if (data.parsedPayload?.vlans && Array.isArray(data.parsedPayload.vlans)) {
+      data.parsedPayload.vlans.sort((a, b) => Number(a.id) - Number(b.id))
+    }
     selectedDeployment.value = data
     showModal.value = true
   } catch (err) {
@@ -230,6 +233,9 @@ async function saveDeploymentEdit() {
 
     if (selectedDeployment.value && selectedDeployment.value.id === editForm.value.id) {
       data.parsedPayload = JSON.parse(data.config_payload || '{}')
+      if (data.parsedPayload?.vlans && Array.isArray(data.parsedPayload.vlans)) {
+        data.parsedPayload.vlans.sort((a, b) => Number(a.id) - Number(b.id))
+      }
       selectedDeployment.value = data
     }
 

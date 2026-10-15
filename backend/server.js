@@ -178,9 +178,9 @@ app.use('/api/fleet', requireAuth, fleetRouter);
 
 // ── GET /api/setup ──────────────────────────────────────────
 app.get('/api/setup', requireAuth, async (_req, res) => {
-  const hardwareRows = await db.all('SELECT * FROM hardware_templates');
-  const vlans = await db.all('SELECT * FROM vlans');
-  const portProfiles = await db.all('SELECT * FROM port_profiles');
+  const hardwareRows = await db.all('SELECT * FROM hardware_templates ORDER BY id ASC');
+  const vlans = await db.all('SELECT * FROM vlans ORDER BY id ASC');
+  const portProfiles = await db.all('SELECT * FROM port_profiles ORDER BY id ASC');
   
   const hardware = hardwareRows.map(hw => {
     let uplinkPorts = [];

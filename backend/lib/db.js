@@ -93,6 +93,7 @@ export async function initDatabase() {
         dbType = 'postgres';
         await runSchema(activeDb, 'postgres');
         await migrateSqliteToPostgres(activeDb, dbPath);
+        await seedDefaultsIfEmpty(activeDb);
         return activeDb;
       } catch (err) {
         if (attempt < 5) {
@@ -113,6 +114,7 @@ export async function initDatabase() {
   });
   dbType = 'sqlite';
   await runSchema(activeDb, 'sqlite');
+  await seedDefaultsIfEmpty(activeDb);
   return activeDb;
 }
 
@@ -130,7 +132,7 @@ async function migrateSqliteToPostgres(pgDb, sqliteFilePath) {
       await pgDb.run('INSERT INTO hardware_templates (id, portPrefix, totalPorts, uplinkPrefix, uplinkPorts) VALUES (?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING', [h.id, h.portPrefix, h.totalPorts, h.uplinkPrefix, h.uplinkPorts]);
     }
 
-    const vlanRows = await sqliteDb.all('SELECT * FROM vlans');
+    const vlanRows = await sqliteDb.all('SELECT * FROM vlans ORDER BY id ASC');
     for (const v of vlanRows) {
       await pgDb.run('INSERT INTO vlans (id, name) VALUES (?, ?) ON CONFLICT (id) DO NOTHING', [v.id, v.name]);
     }
@@ -263,8 +265,10 @@ async function runSchema(db, type) {
   } catch (e) {
     // Column might already exist
   }
+}
 
-  // Seed/sync default hardware templates from json
+async function seedDefaultsIfEmpty(db) {
+  // Seed/sync default hardware templates from json only after migrations
   let jsonPath = path.join(backendRoot, 'data', 'db.json');
   if (!fs.existsSync(jsonPath)) {
     const examplePath = path.join(backendRoot, 'data', 'db.json.example');
@@ -273,32 +277,36 @@ async function runSchema(db, type) {
     }
   }
   if (fs.existsSync(jsonPath)) {
-    const data = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'));
-    if (data.hardware) {
-      for (const hw of data.hardware) {
-        const exists = await db.get('SELECT id FROM hardware_templates WHERE id = ?', [hw.id]);
-        if (!exists) {
+    try {
+      const data = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'));
+      if (data.hardware) {
+        for (const hw of data.hardware) {
+          const exists = await db.get('SELECT id FROM hardware_templates WHERE id = ?', [hw.id]);
+          if (!exists) {
+            await db.run(
+              'INSERT INTO hardware_templates (id, portPrefix, totalPorts, uplinkPrefix, uplinkPorts) VALUES (?, ?, ?, ?, ?)',
+              [hw.id, hw.portPrefix, hw.totalPorts, hw.uplinkPrefix, JSON.stringify(hw.uplinkPorts)]
+            );
+          }
+        }
+      }
+      const vlanCount = await db.get('SELECT COUNT(*) as count FROM vlans');
+      if (Number(vlanCount?.count || 0) === 0 && data.vlans) {
+        for (const vlan of data.vlans) {
+          await db.run('INSERT INTO vlans (id, name) VALUES (?, ?)', [vlan.id, vlan.name]);
+        }
+      }
+      const profCount = await db.get('SELECT COUNT(*) as count FROM port_profiles');
+      if (Number(profCount?.count || 0) === 0 && data.portProfiles) {
+        for (const profile of data.portProfiles) {
           await db.run(
-            'INSERT INTO hardware_templates (id, portPrefix, totalPorts, uplinkPrefix, uplinkPorts) VALUES (?, ?, ?, ?, ?)',
-            [hw.id, hw.portPrefix, hw.totalPorts, hw.uplinkPrefix, JSON.stringify(hw.uplinkPorts)]
+            'INSERT INTO port_profiles (name, mode, vlan, allowed_vlans, native_vlan, description, poeMode, poePriority, poeMaxPower) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            [profile.name, profile.mode, profile.vlan, profile.allowed_vlans, profile.native_vlan, profile.description, profile.poeMode, profile.poePriority, profile.poeMaxPower]
           );
         }
       }
-    }
-    const vlanCount = await db.get('SELECT COUNT(*) as count FROM vlans');
-    if (Number(vlanCount?.count || 0) === 0 && data.vlans) {
-      for (const vlan of data.vlans) {
-        await db.run('INSERT INTO vlans (id, name) VALUES (?, ?)', [vlan.id, vlan.name]);
-      }
-    }
-    const profCount = await db.get('SELECT COUNT(*) as count FROM port_profiles');
-    if (Number(profCount?.count || 0) === 0 && data.portProfiles) {
-      for (const profile of data.portProfiles) {
-        await db.run(
-          'INSERT INTO port_profiles (name, mode, vlan, allowed_vlans, native_vlan, description, poeMode, poePriority, poeMaxPower) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-          [profile.name, profile.mode, profile.vlan, profile.allowed_vlans, profile.native_vlan, profile.description, profile.poeMode, profile.poePriority, profile.poeMaxPower]
-        );
-      }
+    } catch (err) {
+      console.warn('Failed to parse or seed JSON defaults:', err.message);
     }
   }
 
