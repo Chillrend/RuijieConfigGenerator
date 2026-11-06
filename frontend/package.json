@@ -13,6 +13,8 @@
     "@radix-icons/vue": "^1.0.0",
     "@tanstack/vue-table": "^8.21.3",
     "@vueuse/core": "^14.4.0",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
     "bwip-js": "^4.11.4",
     "html5-qrcode": "^2.3.8",
     "jsbarcode": "^3.12.3",

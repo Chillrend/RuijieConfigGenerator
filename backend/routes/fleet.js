@@ -859,4 +859,154 @@ router.post('/global-config/sync-config', async (req, res) => {
   }
 });
 
+// ponytail: batch push arbitrary commands prepended with configure terminal
+router.post('/global-config/batch-push', async (req, res) => {
+  const { commands, switchIds, onlyOnline = true, saveConfig = true } = req.body;
+  const redis = getRedis();
+
+  let rawLines = [];
+  if (Array.isArray(commands)) {
+    rawLines = commands;
+  } else if (typeof commands === 'string') {
+    rawLines = commands.split('\n');
+  }
+
+  const cleanLines = rawLines
+    .map(line => line.trim())
+    .filter(line => line.length > 0 && !line.startsWith('!'));
+
+  // Strip leading 'configure terminal' or 'config t' if user included it
+  while (cleanLines.length > 0 && /^conf(?:ig(?:ure)?)?\s+t(?:erminal)?$/i.test(cleanLines[0])) {
+    cleanLines.shift();
+  }
+
+  if (cleanLines.length === 0) {
+    return res.status(400).json({ error: 'Please enter at least one CLI command to push.' });
+  }
+
+  // Prepend 'configure terminal' and append 'end' + 'write'
+  const commandSequence = ['configure terminal', ...cleanLines, 'end'];
+  if (saveConfig) {
+    commandSequence.push('write');
+  }
+
+  try {
+    const db = getDB();
+    let switches = [];
+    if (Array.isArray(switchIds) && switchIds.length > 0) {
+      const placeholders = switchIds.map(() => '?').join(',');
+      switches = await db.all(`SELECT * FROM switches WHERE id IN (${placeholders})`, switchIds);
+    } else if (onlyOnline) {
+      switches = await db.all("SELECT * FROM switches WHERE status = 'online'");
+    } else {
+      switches = await db.all('SELECT * FROM switches');
+    }
+
+    if (switches.length === 0) {
+      return res.json({
+        success: true,
+        total: 0,
+        successful: 0,
+        failed: 0,
+        message: 'No matching switches found to configure.',
+        results: []
+      });
+    }
+
+    console.log(`[Batch Push SSH] >>> Pushing commands to ${switches.length} switches...`);
+
+    const results = [];
+    let completedCount = 0;
+    const CONCURRENCY = 5;
+
+    for (let i = 0; i < switches.length; i += CONCURRENCY) {
+      const batch = switches.slice(i, i + CONCURRENCY);
+      await Promise.all(
+        batch.map(async (sw) => {
+          const swName = sw.hostname || sw.mgmt_ip;
+          if (!sw.mgmt_ip) {
+            results.push({
+              id: sw.id,
+              hostname: sw.hostname,
+              mgmt_ip: sw.mgmt_ip,
+              status: 'error',
+              error: 'Missing management IP',
+              output: ''
+            });
+            completedCount++;
+            return;
+          }
+
+          try {
+            const output = await runSshSession(
+              sw.mgmt_ip,
+              {
+                username: sw.admin_username || 'admin',
+                password: sw.admin_password || '',
+                enablePassword: sw.enable_password || '',
+                timeout: 35000
+              },
+              commandSequence
+            );
+
+            results.push({
+              id: sw.id,
+              hostname: swName,
+              mgmt_ip: sw.mgmt_ip,
+              status: 'success',
+              output,
+              error: null
+            });
+
+            completedCount++;
+            try {
+              redis.publish('global-action:progress', JSON.stringify({
+                action: 'batch-push',
+                total: switches.length,
+                completed: completedCount,
+                current: swName,
+                success: true
+              }));
+            } catch (e) {}
+          } catch (err) {
+            results.push({
+              id: sw.id,
+              hostname: swName,
+              mgmt_ip: sw.mgmt_ip,
+              status: 'error',
+              error: err.message,
+              output: ''
+            });
+
+            completedCount++;
+            try {
+              redis.publish('global-action:progress', JSON.stringify({
+                action: 'batch-push',
+                total: switches.length,
+                completed: completedCount,
+                current: swName,
+                success: false
+              }));
+            } catch (e) {}
+          }
+        })
+      );
+    }
+
+    const successful = results.filter(r => r.status === 'success').length;
+    const failed = results.filter(r => r.status === 'error').length;
+
+    res.json({
+      success: true,
+      total: switches.length,
+      successful,
+      failed,
+      commandSequence,
+      results
+    });
+  } catch (err) {
+    res.status(500).json({ error: `Batch push failed: ${err.message}` });
+  }
+});
+
 export default router;

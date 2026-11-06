@@ -7,6 +7,8 @@ import { Input } from '../components/ui/input'
 import { Button } from '../components/ui/button'
 import { Badge } from '../components/ui/badge'
 import EditSwitchModal from '../components/EditSwitchModal.vue'
+import SshConsoleModal from '../components/SshConsoleModal.vue'
+import BatchSshModal from '../components/BatchSshModal.vue'
 
 const router = useRouter()
 const switches = ref([])
@@ -20,6 +22,21 @@ const errorMsg = ref('')
 // Edit Switch Modal State
 const editModalOpen = ref(false)
 const switchBeingEdited = ref(null)
+
+// SSH Console Modal State
+const sshModalOpen = ref(false)
+const sshConsoleSwitch = ref(null)
+
+const openSshConsole = (sw) => {
+  sshConsoleSwitch.value = sw
+  sshModalOpen.value = true
+}
+
+// Batch SSH Push Modal State
+const batchModalOpen = ref(false)
+const openBatchModal = () => {
+  batchModalOpen.value = true
+}
 
 const openEditModal = (sw) => {
   switchBeingEdited.value = sw
@@ -443,6 +460,10 @@ onUnmounted(() => {
           <Icon icon="carbon:settings" class="w-4 h-4 mr-1.5" />
           Global Config
         </Button>
+        <Button variant="outline" size="sm" class="border-primary/30 text-primary hover:bg-primary/10" @click="openBatchModal">
+          <Icon icon="carbon:terminal" class="w-4 h-4 mr-1.5" />
+          Batch Push SSH
+        </Button>
         <Button size="sm" @click="openAddModal">
           <Icon icon="lucide:plus" class="w-4 h-4 mr-1.5" />
           Add Switch
@@ -713,6 +734,15 @@ onUnmounted(() => {
               <!-- Action Buttons -->
               <td class="py-2 px-3 text-right whitespace-nowrap" @click.stop>
                 <div class="flex items-center justify-end gap-1">
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    class="h-7 w-7 text-muted-foreground hover:text-primary"
+                    title="SSH Terminal Console"
+                    @click.stop="openSshConsole(sw)"
+                  >
+                    <Icon icon="carbon:terminal" class="w-3.5 h-3.5" />
+                  </Button>
                   <Button
                     variant="ghost"
                     size="icon"
@@ -1065,6 +1095,19 @@ onUnmounted(() => {
       :hardware-models="hardwareModels"
       @saved="handleSwitchSaved"
       @deleted="handleSwitchDeleted"
+    />
+
+    <!-- Interactive SSH Console Modal -->
+    <SshConsoleModal
+      v-model:open="sshModalOpen"
+      :switch-data="sshConsoleSwitch"
+    />
+
+    <!-- Batch SSH Push Modal -->
+    <BatchSshModal
+      v-model:open="batchModalOpen"
+      :switches="switches"
+      @completed="fetchFleetSilent"
     />
   </div>
 </template>

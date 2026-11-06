@@ -10,6 +10,7 @@ import { Label } from '../components/ui/label'
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card'
 import { ScrollArea, ScrollBar } from '../components/ui/scroll-area'
 import EditSwitchModal from '../components/EditSwitchModal.vue'
+import SshConsoleModal from '../components/SshConsoleModal.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -23,6 +24,7 @@ const opticalHistory = ref([])
 const errorMsg = ref('')
 const deployingGrpc = ref(false)
 const editModalOpen = ref(false)
+const sshModalOpen = ref(false)
 
 const handleSwitchSaved = (updatedData) => {
   if (!sw.value) return
@@ -537,6 +539,10 @@ onMounted(() => {
       </div>
 
       <div class="flex items-center gap-2">
+        <Button size="sm" variant="outline" class="bg-primary/5 hover:bg-primary/10 border-primary/30 text-primary" @click="sshModalOpen = true">
+          <Icon icon="carbon:terminal" class="w-3.5 h-3.5 mr-1" />
+          SSH Console
+        </Button>
         <Button size="sm" variant="outline" @click="editModalOpen = true">
           <Icon icon="carbon:edit" class="w-3.5 h-3.5 mr-1" />
           Edit Profile
@@ -1612,6 +1618,12 @@ onMounted(() => {
       :switch-data="sw"
       @saved="handleSwitchSaved"
       @deleted="handleSwitchDeleted"
+    />
+
+    <!-- Interactive SSH Console Modal -->
+    <SshConsoleModal
+      v-model:open="sshModalOpen"
+      :switch-data="sw"
     />
   </div>
 </template>

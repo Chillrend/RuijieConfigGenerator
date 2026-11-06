@@ -19,6 +19,7 @@ import fleetRouter from './routes/fleet.js';
 import { initInflux } from './lib/influx.js';
 import { initQueue, startPeriodicPolling, startDailyConfigBackup } from './lib/queue.js';
 import { getRedis } from './lib/redis.js';
+import { attachInteractiveSsh } from './lib/ssh.js';
 
 // --- ESM __dirname workaround ---
 const __filename = fileURLToPath(import.meta.url);
@@ -701,6 +702,52 @@ io.on('connection', (socket) => {
 
   socket.on('leave:switch', (ip) => {
     if (ip) socket.leave(`switch:${ip}`);
+  });
+
+  // ponytail: interactive direct SSH session over WebSocket
+  socket.on('ssh:init', async ({ switchId, cols, rows }) => {
+    if (!switchId) {
+      return socket.emit('ssh:error', 'Missing switchId');
+    }
+    if (!(process.env.DISABLE_AUTH === 'true' && process.env.NODE_ENV !== 'production')) {
+      const cookieHeader = socket.handshake?.headers?.cookie || '';
+      const match = cookieHeader.match(/auth_token=([^;]+)/);
+      const token = match ? match[1] : null;
+      if (!token) {
+        return socket.emit('ssh:error', 'Unauthorized: No authentication token');
+      }
+      try {
+        jwt.verify(token, JWT_SECRET);
+      } catch (e) {
+        return socket.emit('ssh:error', 'Unauthorized: Invalid authentication token');
+      }
+    }
+
+    try {
+      const sw = await db.get('SELECT * FROM switches WHERE id = ?', [switchId]);
+      if (!sw) {
+        return socket.emit('ssh:error', `Switch ID ${switchId} not found`);
+      }
+      if (!sw.mgmt_ip) {
+        return socket.emit('ssh:error', 'Switch has no management IP configured');
+      }
+
+      if (socket._sshCleanup) {
+        socket._sshCleanup();
+        socket._sshCleanup = null;
+      }
+
+      socket._sshCleanup = attachInteractiveSsh(socket, sw, { cols, rows });
+    } catch (err) {
+      socket.emit('ssh:error', `SSH Init Failed: ${err.message}`);
+    }
+  });
+
+  socket.on('disconnect', () => {
+    if (socket._sshCleanup) {
+      socket._sshCleanup();
+      socket._sshCleanup = null;
+    }
   });
 });
 

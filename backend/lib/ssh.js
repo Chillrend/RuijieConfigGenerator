@@ -1,5 +1,119 @@
 import { Client } from 'ssh2';
 
+// ponytail: interactive direct PTY over WebSocket
+export function attachInteractiveSsh(socket, switchConfig, initialPty = {}) {
+  const {
+    mgmt_ip: host,
+    admin_username: username = 'admin',
+    admin_password: password = '',
+    port = 22
+  } = switchConfig;
+
+  const cols = initialPty.cols || 80;
+  const rows = initialPty.rows || 24;
+
+  const conn = new Client();
+  let streamRef = null;
+  let cleanedUp = false;
+
+  const cleanup = () => {
+    if (cleanedUp) return;
+    cleanedUp = true;
+    socket.off('ssh:data', onSocketData);
+    socket.off('ssh:resize', onSocketResize);
+    socket.off('ssh:close', onSocketClose);
+    socket.off('disconnect', onSocketDisconnect);
+    try { conn.end(); } catch (e) {}
+  };
+
+  const onSocketData = (data) => {
+    if (streamRef && streamRef.writable) {
+      streamRef.write(data);
+    }
+  };
+
+  const onSocketResize = ({ cols: c, rows: r }) => {
+    if (streamRef && streamRef.writable && typeof streamRef.setWindow === 'function') {
+      try {
+        streamRef.setWindow(r, c, 0, 0);
+      } catch (e) {}
+    }
+  };
+
+  const onSocketClose = () => {
+    cleanup();
+  };
+
+  const onSocketDisconnect = () => {
+    cleanup();
+  };
+
+  socket.on('ssh:data', onSocketData);
+  socket.on('ssh:resize', onSocketResize);
+  socket.on('ssh:close', onSocketClose);
+  socket.on('disconnect', onSocketDisconnect);
+
+  conn.on('ready', () => {
+    conn.shell({ term: 'xterm-256color', cols, rows }, (err, stream) => {
+      if (err) {
+        socket.emit('ssh:error', err.message);
+        cleanup();
+        return;
+      }
+      streamRef = stream;
+      socket.emit('ssh:ready');
+
+      stream.on('data', (chunk) => {
+        socket.emit('ssh:data', chunk.toString('utf-8'));
+      });
+
+      stream.on('close', () => {
+        socket.emit('ssh:close');
+        cleanup();
+      });
+    });
+  });
+
+  conn.on('error', (err) => {
+    socket.emit('ssh:error', err.message || 'SSH connection error');
+    cleanup();
+  });
+
+  conn.on('close', () => {
+    socket.emit('ssh:close');
+    cleanup();
+  });
+
+  conn.connect({
+    host,
+    port,
+    username,
+    password,
+    readyTimeout: 15000,
+    algorithms: {
+      kex: [
+        'diffie-hellman-group14-sha1',
+        'diffie-hellman-group1-sha1',
+        'diffie-hellman-group-exchange-sha1',
+        'diffie-hellman-group-exchange-sha256',
+        'ecdh-sha2-nistp256',
+        'ecdh-sha2-nistp384',
+        'ecdh-sha2-nistp521'
+      ],
+      cipher: [
+        'aes128-ctr',
+        'aes192-ctr',
+        'aes256-ctr',
+        'aes128-cbc',
+        '3des-cbc',
+        'aes256-cbc'
+      ]
+    }
+  });
+
+  return cleanup;
+}
+
 // ponytail: interactive SSH session handling unprivileged -> enable (#) escalation and paging disable
 export function runSshSession(host, options = {}, commands = []) {
   return new Promise((resolve, reject) => {
