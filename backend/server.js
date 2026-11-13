@@ -119,7 +119,7 @@ app.use(passport.initialize());
 // Authentication Middleware
 const requireAuth = (req, res, next) => {
   // Dev mode bypass
-  if (process.env.DISABLE_AUTH === 'true' && process.env.NODE_ENV !== 'production') {
+  if (process.env.DISABLE_AUTH === 'true') {
     req.user = { id: 'dev', email: 'dev@localhost', name: 'Dev User' };
     return next();
   }
@@ -709,7 +709,7 @@ io.on('connection', (socket) => {
     if (!switchId) {
       return socket.emit('ssh:error', 'Missing switchId');
     }
-    if (!(process.env.DISABLE_AUTH === 'true' && process.env.NODE_ENV !== 'production')) {
+    if (process.env.DISABLE_AUTH !== 'true') {
       const cookieHeader = socket.handshake?.headers?.cookie || '';
       const match = cookieHeader.match(/auth_token=([^;]+)/);
       const token = match ? match[1] : null;

@@ -148,6 +148,26 @@ interface GigabitEthernet 0/5
   );
   console.log('✓ Switch profile updates and preserves metadata correctly!');
 
+  // Test Switch Groups CRUD
+  console.log('\n--- Testing Switch Groups CRUD ---');
+  const testGroupName = 'Test-Building-' + Date.now();
+  await db.run('INSERT INTO switch_groups (name, description) VALUES (?, ?)', [testGroupName, 'Automated Test Group']);
+  const createdGroup = await db.get('SELECT * FROM switch_groups WHERE name = ?', [testGroupName]);
+  assert.ok(createdGroup, 'Created group must exist in database');
+  assert.strictEqual(createdGroup.name, testGroupName);
+
+  // Assign switch to group
+  await db.run('UPDATE switches SET group_name = ? WHERE id = ?', [testGroupName, sw1.id]);
+  const swWithGroup = await db.get('SELECT group_name FROM switches WHERE id = ?', [sw1.id]);
+  assert.strictEqual(swWithGroup.group_name, testGroupName);
+
+  // Clean up group and unassign switch
+  await db.run('DELETE FROM switch_groups WHERE id = ?', [createdGroup.id]);
+  await db.run('UPDATE switches SET group_name = NULL WHERE group_name = ?', [testGroupName]);
+  const swAfterDelete = await db.get('SELECT group_name FROM switches WHERE id = ?', [sw1.id]);
+  assert.strictEqual(swAfterDelete.group_name, null);
+  console.log('✓ Switch groups created, assigned, and deleted with switch references cleaned!');
+
   console.log('\nAll fleet integration tests completed successfully!');
   process.exit(0);
 }

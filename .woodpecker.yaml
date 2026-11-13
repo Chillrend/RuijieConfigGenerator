@@ -1,0 +1,67 @@
+when:
+  - branch: main
+    event: [push, manual]
+  - event: tag
+
+steps:
+  build-branch:
+    image: woodpeckerci/plugin-kaniko
+    settings:
+      registry: images.pnj.ac.id
+      repo: pnjacid/ruijie-config-generator
+      username:
+        from_secret: REGISTRY_USERNAME
+      password:
+        from_secret: REGISTRY_PASSWORD
+      tags:
+        - latest
+        - ${CI_COMMIT_SHA:0:8}
+    when:
+      branch: main
+      event: [push, manual]
+
+  auto-tag:
+    image: alpine/git
+    environment:
+      GITHUB_TOKEN:
+        from_secret: GITHUB_TOKEN
+    commands:
+      - |
+        if [ -n "$GITHUB_TOKEN" ]; then
+          git config user.name "woodpecker-ci[bot]"
+          git config user.email "ci@pnj.ac.id"
+          git fetch --tags
+          LATEST_TAG=$(git tag -l "v*" --sort=-v:refname | head -n1)
+          if [ -z "$LATEST_TAG" ]; then
+            NEXT_TAG="v0.5.0"
+          else
+            VERSION=${LATEST_TAG#v}
+            MAJOR=$(echo $VERSION | cut -d. -f1)
+            MINOR=$(echo $VERSION | cut -d. -f2)
+            PATCH=$(echo $VERSION | cut -d. -f3)
+            NEXT_TAG="v$MAJOR.$MINOR.$((PATCH + 1))"
+          fi
+          echo "Automated Release: tagging $NEXT_TAG"
+          git tag $NEXT_TAG
+          git push https://x-access-token:$GITHUB_TOKEN@github.com/Chillrend/RuijieConfigGenerator.git $NEXT_TAG
+        else
+          echo "GITHUB_TOKEN secret not configured in Woodpecker; skipping auto-tag push."
+        fi
+    when:
+      branch: main
+      event: push
+
+  build-tag:
+    image: woodpeckerci/plugin-kaniko
+    settings:
+      registry: images.pnj.ac.id
+      repo: pnjacid/ruijie-config-generator
+      username:
+        from_secret: REGISTRY_USERNAME
+      password:
+        from_secret: REGISTRY_PASSWORD
+      tags:
+        - latest
+        - ${CI_COMMIT_TAG}
+    when:
+      event: tag

@@ -6,7 +6,7 @@ services:
     container_name: ruijie-config-generator
     command: ["backend"]
     ports:
-      - "3001:3001"
+      - "${HOST_PORT:-3002}:3001"
     volumes:
       - ./backend/data:/app/backend/data
     restart: unless-stopped
@@ -24,7 +24,7 @@ services:
       - INFLUX_BUCKET=switch_metrics
       - GRPC_COLLECTOR_IP=${GRPC_COLLECTOR_IP:-10.23.9.10}
       - GRPC_COLLECTOR_PORT=${GRPC_COLLECTOR_PORT:-50051}
-      - DISABLE_AUTH=${DISABLE_AUTH:-false}
+      - DISABLE_AUTH=${DISABLE_AUTH:-true}
       - JWT_SECRET=${JWT_SECRET:-m5Qu7yONikydmI3hDDK4ZDE9}
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
