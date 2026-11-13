@@ -28,6 +28,8 @@ steps:
     commands:
       - |
         if [ -n "$GITHUB_TOKEN" ]; then
+          git config user.name "woodpecker-ci[bot]"
+          git config user.email "ci@pnj.ac.id"
           git fetch --tags
           LATEST_TAG=$(git tag -l "v*" --sort=-v:refname | head -n1)
           if [ -z "$LATEST_TAG" ]; then
@@ -41,7 +43,7 @@ steps:
           fi
           echo "Automated Release: tagging $NEXT_TAG"
           git tag $NEXT_TAG
-          git push https://$GITHUB_TOKEN@github.com/Chillrend/RuijieConfigGenerator.git $NEXT_TAG
+          git push https://x-access-token:$GITHUB_TOKEN@github.com/Chillrend/RuijieConfigGenerator.git $NEXT_TAG
         else
           echo "GITHUB_TOKEN secret not configured in Woodpecker; skipping auto-tag push."
         fi
