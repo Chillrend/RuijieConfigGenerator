@@ -16,12 +16,14 @@ const saving = ref(false)
 const deleting = ref(false)
 const errorMsg = ref('')
 const localModels = ref([])
+const availableGroups = ref([])
 
 const form = ref({
   id: null,
   mgmt_ip: '',
   hostname: '',
   inventory_tag: '',
+  group_name: '',
   model_id: '',
   serial_number: '',
   mac_address: '',
@@ -29,6 +31,16 @@ const form = ref({
   admin_password: '',
   enable_password: ''
 })
+
+const loadGroups = async () => {
+  try {
+    const res = await fetch('/api/fleet/groups', { credentials: 'include' })
+    if (res.ok) {
+      const data = await res.json()
+      availableGroups.value = data.groups || []
+    }
+  } catch (e) {}
+}
 
 const loadHardwareModels = async () => {
   if (props.hardwareModels && props.hardwareModels.length > 0) {
@@ -52,12 +64,14 @@ watch(
     if (isOpen) {
       errorMsg.value = ''
       loadHardwareModels()
+      loadGroups()
       const s = props.switchData || {}
       form.value = {
         id: s.id,
         mgmt_ip: s.mgmt_ip || '',
         hostname: s.hostname || '',
         inventory_tag: s.inventory_tag || '',
+        group_name: s.group_name || '',
         model_id: s.model_id || '',
         serial_number: s.serial_number || '',
         mac_address: s.mac_address || '',
@@ -89,6 +103,7 @@ const save = async () => {
       mgmt_ip: form.value.mgmt_ip.trim(),
       hostname: form.value.hostname.trim(),
       inventory_tag: form.value.inventory_tag.trim(),
+      group_name: form.value.group_name ? form.value.group_name.trim() : '',
       model_id: form.value.model_id.trim(),
       serial_number: form.value.serial_number.trim(),
       mac_address: form.value.mac_address.trim(),
@@ -192,7 +207,7 @@ const deleteSwitch = async () => {
             <Icon icon="carbon:network-enterprise" class="w-3.5 h-3.5 text-primary" />
             Basic Identity & Management
           </h4>
-          <div class="grid grid-cols-2 gap-3">
+          <div class="grid grid-cols-2 gap-3 mb-3">
             <div>
               <label class="text-xs font-semibold block mb-1">
                 Management IP <span class="text-destructive">*</span>
@@ -212,6 +227,18 @@ const deleteSwitch = async () => {
                 class="text-xs font-mono"
               />
             </div>
+          </div>
+          <div>
+            <label class="text-xs font-semibold block mb-1">Switch Group</label>
+            <select
+              v-model="form.group_name"
+              class="w-full border rounded-md px-3 py-2 text-xs bg-background text-foreground h-9"
+            >
+              <option value="">(None / Ungrouped)</option>
+              <option v-for="g in availableGroups" :key="g.id" :value="g.name">
+                {{ g.name }}
+              </option>
+            </select>
           </div>
         </div>
 

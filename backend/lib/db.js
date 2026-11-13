@@ -246,6 +246,13 @@ async function runSchema(db, type) {
       status ${textType},
       created_at ${timestampType}
     );
+
+    CREATE TABLE IF NOT EXISTS switch_groups (
+      id ${autoInc},
+      name ${textType} UNIQUE,
+      description ${textType},
+      created_at ${timestampType}
+    );
   `);
 
   try {
@@ -262,6 +269,12 @@ async function runSchema(db, type) {
 
   try {
     await db.exec("ALTER TABLE switches ADD COLUMN grpc_status TEXT DEFAULT 'disabled'");
+  } catch (e) {
+    // Column might already exist
+  }
+
+  try {
+    await db.exec('ALTER TABLE switches ADD COLUMN group_name TEXT');
   } catch (e) {
     // Column might already exist
   }

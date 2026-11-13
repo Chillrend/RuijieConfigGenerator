@@ -148,13 +148,6 @@ const setupWebSocket = () => {
   })
 }
 
-onUnmounted(() => {
-  if (socket) {
-    if (sw.value?.mgmt_ip) socket.emit('leave:switch', sw.value.mgmt_ip)
-    socket.disconnect()
-  }
-})
-
 // Port configuration modal state
 const selectedPort = ref(null)
 const portModalOpen = ref(false)
@@ -520,45 +513,145 @@ const savePortConfig = async () => {
   }
 }
 
+// Mobile detection & Port Management States
+const isMobile = ref(false)
+const checkMobile = () => {
+  isMobile.value = window.innerWidth < 768
+}
+
+const portSearchQuery = ref('')
+const portStatusFilter = ref('all') // 'all' | 'up' | 'down' | 'poe' | 'uplink'
+const portViewMode = ref('auto') // 'auto' | 'cards' | 'table'
+const legendOpen = ref(false)
+const copiedIp = ref(false)
+const copiedConfig = ref(false)
+
+const effectivePortViewMode = computed(() => {
+  if (portViewMode.value === 'cards') return 'cards'
+  if (portViewMode.value === 'table') return 'table'
+  return isMobile.value ? 'cards' : 'table'
+})
+
+const copySwitchIp = () => {
+  if (!sw.value?.mgmt_ip) return
+  navigator.clipboard.writeText(sw.value.mgmt_ip)
+  copiedIp.value = true
+  setTimeout(() => { copiedIp.value = false }, 2000)
+}
+
+const copyRunningConfig = () => {
+  if (!sw.value?.raw_config) return
+  navigator.clipboard.writeText(sw.value.raw_config)
+  copiedConfig.value = true
+  setTimeout(() => { copiedConfig.value = false }, 2000)
+}
+
+const downloadRunningConfig = () => {
+  if (!sw.value?.raw_config) return
+  const blob = new Blob([sw.value.raw_config], { type: 'text/plain' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `${sw.value.hostname || 'switch'}-${sw.value.mgmt_ip || 'config'}.cfg`
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+const portStats = computed(() => {
+  const ports = sw.value?.ports || []
+  return {
+    total: ports.length,
+    up: ports.filter(p => p.operStatus === 'up').length,
+    down: ports.filter(p => p.operStatus !== 'up').length,
+    poe: ports.filter(p => p.poeStatus === 'on' || p.poePower > 0).length,
+    uplinks: ports.filter(p => p.isUplink).length
+  }
+})
+
+const filteredPorts = computed(() => {
+  let list = sw.value?.ports || []
+
+  if (portStatusFilter.value === 'up') {
+    list = list.filter(p => p.operStatus === 'up')
+  } else if (portStatusFilter.value === 'down') {
+    list = list.filter(p => p.operStatus !== 'up')
+  } else if (portStatusFilter.value === 'poe') {
+    list = list.filter(p => p.poeStatus === 'on' || p.poePower > 0)
+  } else if (portStatusFilter.value === 'uplink') {
+    list = list.filter(p => p.isUplink)
+  }
+
+  if (portSearchQuery.value) {
+    const q = portSearchQuery.value.toLowerCase().trim()
+    list = list.filter(p =>
+      (p.name && p.name.toLowerCase().includes(q)) ||
+      (p.shortName && p.shortName.toLowerCase().includes(q)) ||
+      (p.description && p.description.toLowerCase().includes(q)) ||
+      (p.vlan && String(p.vlan).includes(q)) ||
+      (p.allowed_vlans && p.allowed_vlans.toLowerCase().includes(q)) ||
+      (p.uplinkNeighbor && p.uplinkNeighbor.toLowerCase().includes(q)) ||
+      (p.mode && p.mode.toLowerCase().includes(q))
+    )
+  }
+
+  return list
+})
+
 onMounted(() => {
+  checkMobile()
+  window.addEventListener('resize', checkMobile)
   fetchSwitch()
+})
+
+onUnmounted(() => {
+  window.removeEventListener('resize', checkMobile)
+  if (socket) {
+    if (sw.value?.mgmt_ip) socket.emit('leave:switch', sw.value.mgmt_ip)
+    socket.disconnect()
+  }
 })
 </script>
 
 <template>
   <div class="max-w-[1240px] mx-auto px-5 py-2">
     <!-- Breadcrumb & Top Controls -->
-    <div class="flex items-center justify-between mb-4">
-      <div class="flex items-center gap-2 text-sm text-muted-foreground">
-        <button @click="router.push('/fleet')" class="hover:text-foreground flex items-center gap-1 font-medium">
+    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
+      <div class="flex items-center gap-2 text-sm text-muted-foreground min-w-0">
+        <button @click="router.push('/fleet')" class="hover:text-foreground flex items-center gap-1 font-medium shrink-0">
           <Icon icon="lucide:arrow-left" class="w-4 h-4" />
           Fleet Overview
         </button>
         <span>/</span>
-        <span class="text-foreground font-semibold">{{ sw?.hostname || 'Switch Details' }}</span>
+        <span class="text-foreground font-semibold truncate">{{ sw?.hostname || 'Switch Details' }}</span>
+        <span
+          v-if="sw?.group_name"
+          class="text-[10px] font-semibold px-2 py-0.5 rounded-md bg-primary/10 text-primary border border-primary/20 shrink-0 ml-1"
+        >
+          {{ sw.group_name }}
+        </span>
       </div>
 
-      <div class="flex items-center gap-2">
-        <Button size="sm" variant="outline" class="bg-primary/5 hover:bg-primary/10 border-primary/30 text-primary" @click="sshModalOpen = true">
+      <div class="flex items-center gap-1.5 flex-wrap">
+        <Button size="sm" variant="outline" class="h-8 text-xs bg-primary/5 hover:bg-primary/10 border-primary/30 text-primary" @click="sshModalOpen = true">
           <Icon icon="carbon:terminal" class="w-3.5 h-3.5 mr-1" />
           SSH Console
         </Button>
-        <Button size="sm" variant="outline" @click="editModalOpen = true">
+        <Button size="sm" variant="outline" class="h-8 text-xs" @click="editModalOpen = true">
           <Icon icon="carbon:edit" class="w-3.5 h-3.5 mr-1" />
           Edit Profile
         </Button>
-        <Button size="sm" variant="outline" @click="fetchSwitch" :disabled="loading">
+        <Button size="sm" variant="outline" class="h-8 text-xs" @click="fetchSwitch" :disabled="loading">
           <Icon icon="lucide:rotate-ccw" class="w-3.5 h-3.5 mr-1" />
           Reload
         </Button>
-        <Button size="sm" @click="syncSwitch" :disabled="syncing">
+        <Button size="sm" class="h-8 text-xs" @click="syncSwitch" :disabled="syncing">
           <Icon icon="lucide:refresh-cw" class="w-3.5 h-3.5 mr-1.5" :class="syncing ? 'animate-spin' : ''" />
-          {{ syncing ? 'Syncing via SSH...' : 'Sync Switch' }}
+          {{ syncing ? 'Syncing...' : 'Sync Switch' }}
         </Button>
         <Button
           size="sm"
           variant="outline"
-          class="text-destructive hover:text-destructive hover:bg-destructive/10 border-destructive/30"
+          class="h-8 text-xs text-destructive hover:text-destructive hover:bg-destructive/10 border-destructive/30"
           title="Delete switch from fleet"
           @click="deleteThisSwitch"
         >
@@ -653,6 +746,14 @@ onMounted(() => {
                   <Icon icon="carbon:terminal" class="w-3.5 h-3.5" />
                   SSH Fallback
                 </Badge>
+                <Badge
+                  v-if="sw.group_name"
+                  variant="outline"
+                  class="text-xs bg-primary/10 text-primary border-primary/20 font-medium flex items-center gap-1"
+                >
+                  <Icon icon="carbon:folder-shared" class="w-3 h-3 text-primary" />
+                  {{ sw.group_name }}
+                </Badge>
                 <button
                   @click="editModalOpen = true"
                   class="text-xs px-2 py-0.5 rounded-md font-mono bg-muted text-muted-foreground border hover:text-foreground hover:border-primary/50 transition-colors inline-flex items-center gap-1 cursor-pointer"
@@ -662,29 +763,38 @@ onMounted(() => {
                   <Icon icon="carbon:edit" class="w-3 h-3 text-muted-foreground" />
                 </button>
               </div>
-              <div class="flex flex-wrap items-center gap-y-1 gap-x-4 mt-2 text-xs text-muted-foreground font-mono">
-                <div>IP: <span class="text-foreground font-semibold">{{ sw.mgmt_ip }}</span></div>
+              <div class="flex flex-wrap items-center gap-y-1.5 gap-x-4 mt-2.5 text-xs text-muted-foreground font-mono">
+                <div class="flex items-center gap-1 bg-muted/60 px-2 py-0.5 rounded-md">
+                  <span>IP: <strong class="text-foreground">{{ sw.mgmt_ip }}</strong></span>
+                  <button
+                    @click.stop="copySwitchIp"
+                    class="p-0.5 hover:text-primary transition-colors text-muted-foreground rounded cursor-pointer"
+                    title="Copy Management IP"
+                  >
+                    <Icon :icon="copiedIp ? 'lucide:check' : 'lucide:copy'" class="w-3 h-3" :class="copiedIp ? 'text-emerald-500' : ''" />
+                  </button>
+                </div>
                 <div>Model: <span class="text-foreground font-semibold">{{ sw.model_id }}</span></div>
-                <div>SN: <span class="text-foreground">{{ sw.serial_number || '-' }}</span></div>
-                <div>MAC: <span class="text-foreground">{{ sw.mac_address || '-' }}</span></div>
+                <div class="hidden sm:inline">SN: <span class="text-foreground">{{ sw.serial_number || '-' }}</span></div>
+                <div class="hidden md:inline">MAC: <span class="text-foreground">{{ sw.mac_address || '-' }}</span></div>
               </div>
             </div>
           </div>
 
           <!-- Firmware & Uptime Stats -->
-          <div class="flex items-center gap-6 border-t lg:border-t-0 lg:border-l pt-3 lg:pt-0 lg:pl-6 text-xs">
+          <div class="grid grid-cols-3 gap-3 border-t lg:border-t-0 lg:border-l pt-3 lg:pt-0 lg:pl-6 text-xs">
             <div>
               <div class="text-muted-foreground font-medium uppercase text-[10px] tracking-wider">Firmware</div>
-              <div class="font-medium text-foreground mt-0.5">{{ sw.software_version || 'Ruijie RGOS' }}</div>
+              <div class="font-medium text-foreground mt-0.5 truncate max-w-[120px]">{{ sw.software_version ? sw.software_version.replace(/RGOS\s*/i, '') : 'RGOS' }}</div>
             </div>
             <div>
               <div class="text-muted-foreground font-medium uppercase text-[10px] tracking-wider">Uptime</div>
-              <div class="font-medium text-foreground mt-0.5">{{ sw.uptime || '—' }}</div>
+              <div class="font-medium text-foreground mt-0.5 truncate">{{ sw.uptime || '—' }}</div>
             </div>
             <div>
               <div class="text-muted-foreground font-medium uppercase text-[10px] tracking-wider">Last Sync</div>
-              <div class="font-medium text-foreground mt-0.5">
-                {{ sw.last_synced ? new Date(sw.last_synced).toLocaleTimeString() : 'Never' }}
+              <div class="font-medium text-foreground mt-0.5 whitespace-nowrap">
+                {{ sw.last_synced ? new Date(sw.last_synced).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Never' }}
               </div>
             </div>
           </div>
@@ -693,26 +803,39 @@ onMounted(() => {
 
       <!-- Real Switch Faceplate (Mirrors ProvisionerView) -->
       <Card class="overflow-hidden">
-        <CardHeader class="pb-3 flex flex-row items-center justify-between space-y-0">
-          <div>
-            <CardTitle class="text-base flex items-center gap-2">
-              <Icon icon="carbon:network-4" class="w-5 h-5 text-primary" />
-              Switch Chassis Faceplate
-            </CardTitle>
-            <p class="text-xs text-muted-foreground mt-0.5">
-              Physical layout for {{ sw.model_id }} • Click any port to configure
-            </p>
+        <CardHeader class="pb-3 flex flex-col md:flex-row md:items-center justify-between gap-2 space-y-0">
+          <div class="flex items-center justify-between w-full md:w-auto">
+            <div>
+              <CardTitle class="text-base flex items-center gap-2">
+                <Icon icon="carbon:network-4" class="w-5 h-5 text-primary" />
+                Switch Chassis Faceplate
+              </CardTitle>
+              <p class="text-xs text-muted-foreground mt-0.5">
+                Physical layout for {{ sw.model_id }} • Click any port to configure
+              </p>
+            </div>
+            <!-- Mobile Legend Toggle Button -->
+            <button
+              @click="legendOpen = !legendOpen"
+              class="md:hidden text-xs text-muted-foreground hover:text-foreground flex items-center gap-1 px-2 py-1 rounded bg-muted/60"
+            >
+              <span>Legend</span>
+              <Icon :icon="legendOpen ? 'lucide:chevron-up' : 'lucide:chevron-down'" class="w-3.5 h-3.5" />
+            </button>
           </div>
 
-          <div class="flex items-center gap-3 text-xs text-muted-foreground">
-            <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-emerald-500 shadow-[0_0_6px_#10b981]"></span>Link Up</span>
-            <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-zinc-600"></span>Link Down</span>
-            <span class="flex items-center gap-1.5"><span class="legend-dot bg-cyan-500/20 border-cyan-500/50 border"></span>Access</span>
-            <span class="flex items-center gap-1.5"><span class="legend-dot bg-amber-500/20 border-amber-500/50 border"></span>Trunk</span>
+          <!-- Legend Items -->
+          <div
+            :class="legendOpen ? 'flex' : 'hidden md:flex'"
+            class="items-center gap-2.5 text-xs text-muted-foreground flex-wrap pt-2 md:pt-0"
+          >
+            <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-emerald-500 shadow-[0_0_6px_#10b981]"></span>Link Up</span>
+            <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-zinc-600"></span>Link Down</span>
+            <span class="flex items-center gap-1"><span class="legend-dot bg-cyan-500/20 border-cyan-500/50 border"></span>Access</span>
+            <span class="flex items-center gap-1"><span class="legend-dot bg-amber-500/20 border-amber-500/50 border"></span>Trunk</span>
             <span class="flex items-center gap-1 text-blue-500 font-semibold"><Icon icon="ph:arrow-fat-up-fill" class="w-3.5 h-3.5" />Uplink</span>
-            <span class="flex items-center gap-1 text-amber-500 font-semibold"><Icon icon="ph:lightning-fill" class="w-3.5 h-3.5" />PoE Active</span>
-            <span class="flex items-center gap-1 text-zinc-400 font-medium"><Icon icon="ph:lightning-slash-fill" class="w-3.5 h-3.5" />PoE Disabled</span>
-            <span class="flex items-center gap-1 text-blue-600 dark:text-blue-400 font-semibold"><span class="px-1 text-[9px] bg-blue-500/20 border border-blue-400/30 rounded font-mono font-bold">Ag#</span>Aggregated</span>
+            <span class="flex items-center gap-1 text-amber-500 font-semibold"><Icon icon="ph:lightning-fill" class="w-3.5 h-3.5" />PoE</span>
+            <span class="flex items-center gap-1 text-blue-600 dark:text-blue-400 font-semibold"><span class="px-1 text-[9px] bg-blue-500/20 border border-blue-400/30 rounded font-mono font-bold">Ag#</span>Lag</span>
           </div>
         </CardHeader>
 
@@ -895,153 +1018,310 @@ onMounted(() => {
         </CardContent>
       </Card>
 
-      <!-- Tab Navigation -->
-      <div class="border-b flex gap-6 text-sm font-medium">
+      <!-- Responsive Scrollable Tab Navigation -->
+      <div class="border-b overflow-x-auto flex items-center gap-2 sm:gap-6 text-xs sm:text-sm font-medium whitespace-nowrap select-none">
         <button
           @click="activeTab = 'ports'"
-          class="pb-3 border-b-2 transition-colors flex items-center gap-1.5"
-          :class="activeTab === 'ports' ? 'border-primary text-primary' : 'border-transparent text-muted-foreground hover:text-foreground'"
+          class="pb-3 border-b-2 transition-colors flex items-center gap-1.5 shrink-0"
+          :class="activeTab === 'ports' ? 'border-primary text-primary font-semibold' : 'border-transparent text-muted-foreground hover:text-foreground'"
         >
-          <Icon icon="carbon:network-interface" class="w-4 h-4" />
-          Port Interfaces ({{ sw.ports?.length || 0 }})
+          <Icon icon="carbon:network-interface" class="w-4 h-4 shrink-0" />
+          <span>Port Interfaces</span>
+          <span class="text-xs px-1.5 py-0.2 rounded-full bg-muted font-mono font-medium">{{ sw.ports?.length || 0 }}</span>
         </button>
 
         <button
           @click="activeTab = 'optical'"
-          class="pb-3 border-b-2 transition-colors flex items-center gap-1.5"
-          :class="activeTab === 'optical' ? 'border-primary text-primary' : 'border-transparent text-muted-foreground hover:text-foreground'"
+          class="pb-3 border-b-2 transition-colors flex items-center gap-1.5 shrink-0"
+          :class="activeTab === 'optical' ? 'border-primary text-primary font-semibold' : 'border-transparent text-muted-foreground hover:text-foreground'"
         >
-          <Icon icon="carbon:meter" class="w-4 h-4" />
-          Optical DDM Transceivers ({{ opticalTransceivers.filter(o => o.status !== 'absent').length }}/{{ opticalTransceivers.length }})
+          <Icon icon="carbon:meter" class="w-4 h-4 shrink-0" />
+          <span>Optical DDM</span>
+          <span class="text-xs px-1.5 py-0.2 rounded-full bg-muted font-mono font-medium">{{ opticalTransceivers.filter(o => o.status !== 'absent').length }}/{{ opticalTransceivers.length }}</span>
         </button>
 
         <button
           @click="activeTab = 'lldp'"
-          class="pb-3 border-b-2 transition-colors flex items-center gap-1.5"
-          :class="activeTab === 'lldp' ? 'border-primary text-primary' : 'border-transparent text-muted-foreground hover:text-foreground'"
+          class="pb-3 border-b-2 transition-colors flex items-center gap-1.5 shrink-0"
+          :class="activeTab === 'lldp' ? 'border-primary text-primary font-semibold' : 'border-transparent text-muted-foreground hover:text-foreground'"
         >
-          <Icon icon="carbon:tree-view" class="w-4 h-4" />
-          Uplink & LLDP Topology ({{ sw.lldp?.length || 0 }})
+          <Icon icon="carbon:tree-view" class="w-4 h-4 shrink-0" />
+          <span>LLDP Topology</span>
+          <span class="text-xs px-1.5 py-0.2 rounded-full bg-muted font-mono font-medium">{{ sw.lldp?.length || 0 }}</span>
         </button>
 
         <button
           @click="activeTab = 'config'"
-          class="pb-3 border-b-2 transition-colors flex items-center gap-1.5"
-          :class="activeTab === 'config' ? 'border-primary text-primary' : 'border-transparent text-muted-foreground hover:text-foreground'"
+          class="pb-3 border-b-2 transition-colors flex items-center gap-1.5 shrink-0"
+          :class="activeTab === 'config' ? 'border-primary text-primary font-semibold' : 'border-transparent text-muted-foreground hover:text-foreground'"
         >
-          <Icon icon="carbon:terminal" class="w-4 h-4" />
-          Running Configuration
+          <Icon icon="carbon:terminal" class="w-4 h-4 shrink-0" />
+          <span>Running Config</span>
         </button>
       </div>
 
-      <!-- TAB 1: Ports Table -->
-      <div v-if="activeTab === 'ports'" class="border rounded-xl bg-card overflow-hidden shadow-xs">
-        <div class="overflow-x-auto">
-          <table class="w-full text-left border-collapse text-xs">
-            <thead>
-              <tr class="border-b bg-muted/40 text-[11px] font-semibold text-muted-foreground uppercase tracking-wider">
-                <th class="py-2.5 px-3 min-w-[120px]">Port</th>
-                <th class="py-2.5 px-3">Link Status</th>
-                <th class="py-2.5 px-3">Speed</th>
-                <th class="py-2.5 px-3">Mode</th>
-                <th class="py-2.5 px-3">VLAN</th>
-                <th class="py-2.5 px-3">PoE</th>
-                <th class="py-2.5 px-3">Connected Peer / Device</th>
-                <th class="py-2.5 px-3">Description</th>
-                <th class="py-2.5 px-3 text-right">Actions</th>
-              </tr>
-            </thead>
-            <tbody class="divide-y">
-              <tr
-                v-for="p in sw.ports"
-                :key="p.name"
-                class="hover:bg-muted/30 transition-colors"
+      <!-- TAB 1: Ports Management -->
+      <div v-if="activeTab === 'ports'" class="space-y-3.5">
+        <!-- Port Filter & Search Toolbar -->
+        <div class="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2.5">
+          <!-- Search box -->
+          <div class="relative flex-1 min-w-[200px]">
+            <Icon icon="lucide:search" class="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              v-model="portSearchQuery"
+              placeholder="Filter ports by name (Gi0/1), VLAN, PoE, or description..."
+              class="pl-9 pr-8 bg-card text-xs h-9"
+            />
+            <button
+              v-if="portSearchQuery"
+              @click="portSearchQuery = ''"
+              class="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+            >
+              <Icon icon="lucide:x" class="w-3.5 h-3.5" />
+            </button>
+          </div>
+
+          <!-- Filter Chips & View Switcher -->
+          <div class="flex items-center gap-1.5 flex-wrap">
+            <button
+              @click="portStatusFilter = 'all'"
+              class="px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all"
+              :class="portStatusFilter === 'all' ? 'bg-primary/10 text-primary border border-primary/20 font-bold' : 'bg-muted/60 text-muted-foreground hover:text-foreground'"
+            >
+              All ({{ portStats.total }})
+            </button>
+            <button
+              @click="portStatusFilter = 'up'"
+              class="px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all flex items-center gap-1"
+              :class="portStatusFilter === 'up' ? 'bg-emerald-500/15 text-emerald-600 border border-emerald-500/30 font-bold' : 'bg-muted/60 text-muted-foreground hover:text-foreground'"
+            >
+              <span class="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+              Up ({{ portStats.up }})
+            </button>
+            <button
+              @click="portStatusFilter = 'down'"
+              class="px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all flex items-center gap-1"
+              :class="portStatusFilter === 'down' ? 'bg-zinc-500/15 text-zinc-600 dark:text-zinc-300 border border-zinc-500/30 font-bold' : 'bg-muted/60 text-muted-foreground hover:text-foreground'"
+            >
+              <span class="w-1.5 h-1.5 rounded-full bg-zinc-400" />
+              Down ({{ portStats.down }})
+            </button>
+            <button
+              @click="portStatusFilter = 'poe'"
+              class="px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all flex items-center gap-1"
+              :class="portStatusFilter === 'poe' ? 'bg-amber-500/15 text-amber-600 border border-amber-500/30 font-bold' : 'bg-muted/60 text-muted-foreground hover:text-foreground'"
+            >
+              <Icon icon="ph:lightning-fill" class="w-3 h-3 text-amber-500" />
+              PoE ({{ portStats.poe }})
+            </button>
+            <button
+              @click="portStatusFilter = 'uplink'"
+              class="px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all flex items-center gap-1"
+              :class="portStatusFilter === 'uplink' ? 'bg-blue-500/15 text-blue-600 border border-blue-500/30 font-bold' : 'bg-muted/60 text-muted-foreground hover:text-foreground'"
+            >
+              <Icon icon="ph:arrow-fat-up-fill" class="w-3 h-3 text-blue-500" />
+              Uplinks ({{ portStats.uplinks }})
+            </button>
+
+            <!-- Mode Switcher -->
+            <div class="flex items-center border rounded-md p-0.5 bg-muted/60 h-8 ml-auto sm:ml-0">
+              <button
+                @click="portViewMode = 'cards'"
+                class="px-2 py-1 rounded text-xs font-medium flex items-center gap-1 transition-all"
+                :class="effectivePortViewMode === 'cards' ? 'bg-background shadow-xs text-foreground font-semibold' : 'text-muted-foreground hover:text-foreground'"
+                title="Card View"
               >
-                <!-- Port Name -->
-                <td class="py-2 px-3 font-mono font-semibold text-xs whitespace-nowrap">
-                  <span :title="p.name">{{ p.shortName || p.name }}</span>
-                  <span v-if="p.aggregatePort" class="ml-1 px-1.5 py-0.2 rounded text-[9px] font-semibold bg-blue-500/15 text-blue-600 dark:text-blue-400 font-mono border border-blue-400/20">
+                <Icon icon="carbon:grid" class="w-3.5 h-3.5" />
+              </button>
+              <button
+                @click="portViewMode = 'table'"
+                class="px-2 py-1 rounded text-xs font-medium flex items-center gap-1 transition-all"
+                :class="effectivePortViewMode === 'table' ? 'bg-background shadow-xs text-foreground font-semibold' : 'text-muted-foreground hover:text-foreground'"
+                title="Table View"
+              >
+                <Icon icon="carbon:table" class="w-3.5 h-3.5" />
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Empty state when search filters no ports -->
+        <div v-if="filteredPorts.length === 0" class="py-12 text-center text-muted-foreground border rounded-xl bg-card">
+          <Icon icon="carbon:network-overlay" class="w-10 h-10 mx-auto mb-2 opacity-40" />
+          <p class="text-sm font-medium">No ports match filter criteria.</p>
+          <button @click="portSearchQuery = ''; portStatusFilter = 'all'" class="text-xs text-primary underline mt-1">
+            Reset filters
+          </button>
+        </div>
+
+        <!-- PORT VIEW 1: RESPONSIVE CARDS (Mobile default) -->
+        <div
+          v-else-if="effectivePortViewMode === 'cards'"
+          class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3"
+        >
+          <div
+            v-for="p in filteredPorts"
+            :key="p.name"
+            class="bg-card border rounded-xl p-3.5 shadow-xs hover:border-primary/50 transition-all flex flex-col justify-between gap-2.5"
+            :class="p.operStatus === 'up' ? 'border-l-4 border-l-emerald-500' : 'border-l-4 border-l-zinc-300 dark:border-l-zinc-700'"
+          >
+            <div>
+              <!-- Card Header -->
+              <div class="flex items-center justify-between gap-1.5 mb-2">
+                <div class="flex items-center gap-1.5 min-w-0">
+                  <span class="font-mono font-bold text-sm text-foreground truncate">{{ p.shortName || p.name }}</span>
+                  <span v-if="p.aggregatePort" class="text-[9px] font-bold px-1.5 py-0.2 rounded bg-blue-500/15 text-blue-600 font-mono border border-blue-400/20">
                     {{ p.aggregatePort }}
                   </span>
-                </td>
-
-                <!-- Status -->
-                <td class="py-2 px-3">
-                  <span
-                    class="inline-flex items-center gap-1.5 text-[11px] font-medium px-2 py-0.5 rounded-full whitespace-nowrap"
-                    :class="p.operStatus === 'up' ? 'bg-emerald-500/10 text-emerald-600' : 'bg-zinc-500/10 text-zinc-500'"
-                  >
-                    <span class="w-1.5 h-1.5 rounded-full" :class="p.operStatus === 'up' ? 'bg-emerald-500' : 'bg-zinc-400'" />
-                    {{ (p.operStatus || 'DOWN').toUpperCase() }}
+                  <span v-if="p.isUplink" class="text-blue-500" title="Uplink Port">
+                    <Icon icon="ph:arrow-fat-up-fill" class="w-3.5 h-3.5" />
                   </span>
-                </td>
+                </div>
 
-                <!-- Speed -->
-                <td class="py-2 px-3 text-xs font-mono font-medium text-foreground whitespace-nowrap">
-                  {{ p.speed || 'Auto' }}
-                </td>
+                <span
+                  class="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full"
+                  :class="p.operStatus === 'up' ? 'bg-emerald-500/10 text-emerald-600' : 'bg-muted text-muted-foreground'"
+                >
+                  <span class="w-1.5 h-1.5 rounded-full" :class="p.operStatus === 'up' ? 'bg-emerald-500' : 'bg-zinc-400'" />
+                  {{ (p.operStatus || 'DOWN').toUpperCase() }} {{ p.speed && p.operStatus === 'up' ? `(${p.speed})` : '' }}
+                </span>
+              </div>
 
-                <!-- Mode -->
-                <td class="py-2 px-3 text-xs capitalize font-medium">
-                  {{ p.mode || 'access' }}
-                </td>
-
-                <!-- VLAN with Tooltip -->
-                <td class="py-2 px-3 text-xs font-mono whitespace-nowrap">
-                  <span v-if="p.mode === 'access'" class="px-1.5 py-0.5 rounded bg-muted text-foreground font-medium text-[11px]">
-                    VLAN {{ p.vlan || 1 }}
+              <!-- Card Body Info -->
+              <div class="space-y-1.5 text-xs">
+                <!-- VLAN & Mode -->
+                <div class="flex items-center justify-between text-[11px]">
+                  <span class="text-muted-foreground">VLAN / Mode</span>
+                  <span v-if="p.mode === 'access'" class="px-1.5 py-0.2 rounded bg-muted font-mono font-semibold text-foreground">
+                    VLAN {{ p.vlan || 1 }} (Access)
                   </span>
-                  <span
-                    v-else
-                    :title="`Allowed VLANs: ${p.allowed_vlans || 'ALL'}${p.native_vlan ? ' (Native: ' + p.native_vlan + ')' : ''}`"
-                    class="px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-600 font-medium text-[11px] cursor-help inline-block max-w-[120px] truncate align-middle"
-                  >
-                    {{ formatAllowedVlans(p.allowed_vlans) }}<span v-if="p.native_vlan" class="text-muted-foreground text-[10px]"> (N:{{ p.native_vlan }})</span>
+                  <span v-else class="px-1.5 py-0.2 rounded bg-amber-500/10 text-amber-600 font-mono font-semibold" :title="`Allowed: ${p.allowed_vlans}`">
+                    Trunk: {{ formatAllowedVlans(p.allowed_vlans) }}
                   </span>
-                </td>
+                </div>
 
-                <!-- PoE -->
-                <td class="py-2 px-3 text-xs whitespace-nowrap">
-                  <span v-if="p.poeStatus === 'on' || p.poePower > 0" class="inline-flex items-center gap-1 text-amber-600 font-semibold bg-amber-500/10 px-1.5 py-0.5 rounded text-[11px] whitespace-nowrap">
+                <!-- PoE Wattage -->
+                <div class="flex items-center justify-between text-[11px]">
+                  <span class="text-muted-foreground">PoE Power</span>
+                  <span v-if="p.poeStatus === 'on' || p.poePower > 0" class="inline-flex items-center gap-1 text-amber-600 font-bold bg-amber-500/10 px-1.5 py-0.2 rounded">
                     <Icon icon="ph:lightning-fill" class="w-3 h-3" />
                     {{ p.poePowerStr || (p.poePower + 'W') }}
                   </span>
-                  <span v-else-if="p.poeMode === 'disabled'" class="inline-flex items-center gap-1 text-zinc-400 font-medium bg-muted px-1.5 py-0.5 rounded text-[11px] whitespace-nowrap">
-                    <Icon icon="ph:lightning-slash-fill" class="w-3 h-3 text-zinc-400" />
-                    Disabled
-                  </span>
-                  <span v-else-if="p.poeMode === 'enabled'" class="text-[11px] text-muted-foreground">Enabled (0W)</span>
-                  <span v-else class="text-muted-foreground text-[11px]">—</span>
-                </td>
+                  <span v-else-if="p.poeMode === 'disabled'" class="text-zinc-400 font-medium">Disabled</span>
+                  <span v-else class="text-muted-foreground">0W</span>
+                </div>
 
-                <!-- Connected Peer / AP / Device -->
-                <td class="py-2 px-3 text-xs max-w-[140px] truncate">
-                  <div
-                    v-if="p.uplinkNeighbor"
-                    :title="`${p.uplinkNeighbor}${p.uplinkNeighborPort ? ' (' + p.uplinkNeighborPort + ')' : ''}`"
-                    class="inline-flex items-center gap-1 font-semibold px-1.5 py-0.5 rounded text-[11px] whitespace-nowrap cursor-help"
+                <!-- Connected Device -->
+                <div v-if="p.uplinkNeighbor" class="flex items-center justify-between text-[11px] pt-0.5">
+                  <span class="text-muted-foreground">Connected</span>
+                  <span
+                    class="inline-flex items-center gap-1 font-semibold px-1.5 py-0.2 rounded text-[11px] truncate max-w-[150px]"
                     :class="p.isUplink ? 'text-blue-600 bg-blue-500/10' : 'text-purple-600 dark:text-purple-400 bg-purple-500/10'"
                   >
-                    <Icon :icon="p.isUplink ? 'ph:arrow-fat-up-fill' : 'carbon:wifi'" class="w-3 h-3" />
-                    <span class="truncate max-w-[110px]">{{ p.uplinkNeighbor }}</span>
-                  </div>
-                  <span v-else class="text-muted-foreground text-[11px]">—</span>
-                </td>
+                    <Icon :icon="p.isUplink ? 'ph:arrow-fat-up-fill' : 'carbon:wifi'" class="w-3 h-3 shrink-0" />
+                    <span class="truncate">{{ p.uplinkNeighbor }}</span>
+                  </span>
+                </div>
 
-                <!-- Description with Tooltip -->
-                <td class="py-2 px-3 text-xs text-muted-foreground max-w-[140px] truncate" :title="p.description || ''">
-                  {{ p.description || '—' }}
-                </td>
+                <!-- Description -->
+                <div v-if="p.description" class="text-[11px] text-muted-foreground italic truncate" :title="p.description">
+                  "{{ p.description }}"
+                </div>
+              </div>
+            </div>
 
-                <!-- Action Button -->
-                <td class="py-2 px-3 text-right whitespace-nowrap">
-                  <Button variant="outline" size="sm" class="h-6 text-[11px] px-2.5 font-medium" @click="openPortConfig(p)">
-                    Configure
-                  </Button>
-                </td>
-              </tr>
-            </tbody>
-          </table>
+            <!-- Card Action Footer -->
+            <div class="pt-2 border-t flex items-center justify-end">
+              <Button size="sm" variant="outline" class="w-full h-8 text-xs font-semibold" @click="openPortConfig(p)">
+                <Icon icon="carbon:settings-adjust" class="w-3.5 h-3.5 mr-1 text-primary" />
+                Configure Port
+              </Button>
+            </div>
+          </div>
+        </div>
+
+        <!-- PORT VIEW 2: DESKTOP TABLE -->
+        <div v-else class="border rounded-xl bg-card overflow-hidden shadow-xs">
+          <div class="overflow-x-auto">
+            <table class="w-full text-left border-collapse text-xs">
+              <thead>
+                <tr class="border-b bg-muted/40 text-[11px] font-semibold text-muted-foreground uppercase tracking-wider">
+                  <th class="py-2.5 px-3 min-w-[110px]">Port</th>
+                  <th class="py-2.5 px-3">Status</th>
+                  <th class="py-2.5 px-3">Speed</th>
+                  <th class="py-2.5 px-3">Mode</th>
+                  <th class="py-2.5 px-3">VLAN</th>
+                  <th class="py-2.5 px-3">PoE</th>
+                  <th class="py-2.5 px-3">Connected Peer</th>
+                  <th class="py-2.5 px-3">Description</th>
+                  <th class="py-2.5 px-3 text-right">Action</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y">
+                <tr
+                  v-for="p in filteredPorts"
+                  :key="p.name"
+                  class="hover:bg-muted/30 transition-colors"
+                >
+                  <td class="py-2 px-3 font-mono font-semibold text-xs whitespace-nowrap">
+                    <span :title="p.name">{{ p.shortName || p.name }}</span>
+                    <span v-if="p.aggregatePort" class="ml-1 px-1.5 py-0.2 rounded text-[9px] font-semibold bg-blue-500/15 text-blue-600 dark:text-blue-400 font-mono border border-blue-400/20">
+                      {{ p.aggregatePort }}
+                    </span>
+                  </td>
+                  <td class="py-2 px-3">
+                    <span
+                      class="inline-flex items-center gap-1.5 text-[11px] font-medium px-2 py-0.5 rounded-full whitespace-nowrap"
+                      :class="p.operStatus === 'up' ? 'bg-emerald-500/10 text-emerald-600' : 'bg-zinc-500/10 text-zinc-500'"
+                    >
+                      <span class="w-1.5 h-1.5 rounded-full" :class="p.operStatus === 'up' ? 'bg-emerald-500' : 'bg-zinc-400'" />
+                      {{ (p.operStatus || 'DOWN').toUpperCase() }}
+                    </span>
+                  </td>
+                  <td class="py-2 px-3 font-mono">{{ p.speed || 'Auto' }}</td>
+                  <td class="py-2 px-3 capitalize font-medium">{{ p.mode || 'access' }}</td>
+                  <td class="py-2 px-3 font-mono whitespace-nowrap">
+                    <span v-if="p.mode === 'access'" class="px-1.5 py-0.5 rounded bg-muted text-foreground font-medium text-[11px]">
+                      VLAN {{ p.vlan || 1 }}
+                    </span>
+                    <span
+                      v-else
+                      :title="`Allowed: ${p.allowed_vlans || 'ALL'}`"
+                      class="px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-600 font-medium text-[11px] truncate max-w-[120px] inline-block"
+                    >
+                      {{ formatAllowedVlans(p.allowed_vlans) }}
+                    </span>
+                  </td>
+                  <td class="py-2 px-3 whitespace-nowrap">
+                    <span v-if="p.poeStatus === 'on' || p.poePower > 0" class="inline-flex items-center gap-1 text-amber-600 font-semibold bg-amber-500/10 px-1.5 py-0.5 rounded text-[11px]">
+                      <Icon icon="ph:lightning-fill" class="w-3 h-3" />
+                      {{ p.poePowerStr || (p.poePower + 'W') }}
+                    </span>
+                    <span v-else class="text-muted-foreground text-[11px]">0W</span>
+                  </td>
+                  <td class="py-2 px-3 text-xs max-w-[140px] truncate">
+                    <div
+                      v-if="p.uplinkNeighbor"
+                      class="inline-flex items-center gap-1 font-semibold px-1.5 py-0.5 rounded text-[11px] whitespace-nowrap"
+                      :class="p.isUplink ? 'text-blue-600 bg-blue-500/10' : 'text-purple-600 dark:text-purple-400 bg-purple-500/10'"
+                    >
+                      <Icon :icon="p.isUplink ? 'ph:arrow-fat-up-fill' : 'carbon:wifi'" class="w-3 h-3" />
+                      <span class="truncate max-w-[110px]">{{ p.uplinkNeighbor }}</span>
+                    </div>
+                    <span v-else class="text-muted-foreground text-[11px]">—</span>
+                  </td>
+                  <td class="py-2 px-3 text-xs text-muted-foreground max-w-[140px] truncate">
+                    {{ p.description || '—' }}
+                  </td>
+                  <td class="py-2 px-3 text-right whitespace-nowrap">
+                    <Button variant="outline" size="sm" class="h-6 text-[11px] px-2.5 font-medium" @click="openPortConfig(p)">
+                      Configure
+                    </Button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
         </div>
       </div>
 
@@ -1060,95 +1340,150 @@ onMounted(() => {
             No optical transceivers detected or switch has no active fiber ports inserted.
           </div>
 
-          <div v-else class="overflow-x-auto">
-            <table class="w-full text-left border-collapse text-sm">
-              <thead>
-                <tr class="border-b bg-muted/40 text-xs font-semibold text-muted-foreground uppercase tracking-wider">
-                  <th class="py-3 px-4">Port</th>
-                  <th class="py-3 px-4">Port Description</th>
-                  <th class="py-3 px-4">Brand</th>
-                  <th class="py-3 px-4">Specs & Part Number</th>
-                  <th class="py-3 px-4">Rx / Tx Power (dBm)</th>
-                  <th class="py-3 px-4">Temp & Voltage</th>
-                  <th class="py-3 px-4">Health</th>
-                </tr>
-              </thead>
-              <tbody class="divide-y font-mono text-xs">
-                <tr v-for="opt in opticalTransceivers" :key="opt.port" class="hover:bg-muted/30">
-                  <td class="py-3 px-4 font-bold">{{ opt.portShort || opt.port }}</td>
-
-                  <td class="py-3 px-4 font-sans text-xs text-muted-foreground truncate max-w-[200px]">
-                    <span :title="getPortDescription(opt.port, opt.portShort)" class="font-medium text-foreground">
-                      {{ getPortDescription(opt.port, opt.portShort) }}
-                    </span>
-                  </td>
-
-                  <td class="py-3 px-4 font-sans">
-                    <span v-if="opt.vendor" class="px-2 py-0.5 rounded bg-muted font-semibold text-xs text-foreground">
+          <div v-else>
+            <!-- Mobile Optical Cards -->
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 p-3 md:hidden">
+              <div
+                v-for="opt in opticalTransceivers"
+                :key="opt.port"
+                class="bg-muted/30 border rounded-xl p-3 flex flex-col justify-between gap-2"
+              >
+                <div class="flex items-center justify-between">
+                  <div class="flex items-center gap-2">
+                    <span class="font-mono font-bold text-sm text-foreground">{{ opt.portShort || opt.port }}</span>
+                    <span v-if="opt.vendor" class="text-[10px] font-semibold px-1.5 py-0.2 rounded bg-muted">
                       {{ opt.vendor }}
                     </span>
-                    <span v-else-if="opt.status === 'absent'" class="text-zinc-500 italic">Absent</span>
-                    <span v-else class="text-muted-foreground">—</span>
-                  </td>
+                  </div>
+                  <span
+                    class="px-2 py-0.5 rounded text-[10px] uppercase font-semibold"
+                    :class="{
+                      'bg-emerald-500/10 text-emerald-600': opt.status === 'normal',
+                      'bg-amber-500/10 text-amber-600': opt.status === 'warning',
+                      'bg-rose-500/10 text-rose-600': opt.status === 'critical',
+                      'bg-slate-500/10 text-slate-500 border border-slate-500/20': opt.status === 'no_ddm',
+                      'bg-zinc-500/10 text-zinc-400': opt.status === 'absent' || opt.status === 'no_signal'
+                    }"
+                  >
+                    {{ opt.status === 'no_ddm' ? 'No DDM' : opt.status === 'no_signal' ? 'No Link' : opt.status === 'absent' ? 'Absent' : opt.status }}
+                  </span>
+                </div>
 
-                  <td class="py-3 px-4 font-sans text-xs">
-                    <div v-if="opt.partNumber || opt.transceiverType" class="flex flex-col">
-                      <span class="font-medium text-foreground">{{ opt.partNumber || opt.transceiverType }}</span>
-                      <span class="text-[11px] text-muted-foreground font-mono" v-if="opt.transceiverType && opt.partNumber">
-                        {{ opt.transceiverType }}{{ opt.wavelength ? ' (' + opt.wavelength + 'nm)' : '' }}
+                <div class="text-xs text-muted-foreground truncate" :title="getPortDescription(opt.port, opt.portShort)">
+                  {{ getPortDescription(opt.port, opt.portShort) }}
+                </div>
+
+                <div class="text-[11px] font-mono flex items-center justify-between pt-1 border-t">
+                  <span class="text-muted-foreground">Power:</span>
+                  <div v-if="opt.status === 'absent'" class="text-zinc-500">Absent</div>
+                  <div v-else-if="opt.status === 'no_ddm'" class="text-zinc-500">No DDM</div>
+                  <div v-else class="flex items-center gap-1">
+                    <span class="text-[10px] text-muted-foreground">Rx</span>
+                    <span :class="getRxColor(opt.rxPower)">{{ opt.rxPower !== null ? `${opt.rxPower}dBm` : '-' }}</span>
+                    <span class="text-muted-foreground/60">/</span>
+                    <span class="text-[10px] text-muted-foreground">Tx</span>
+                    <span :class="getTxColor(opt.txPower)">{{ opt.txPower !== null ? `${opt.txPower}dBm` : '-' }}</span>
+                  </div>
+                </div>
+
+                <div v-if="opt.temperature !== null" class="text-[11px] font-mono flex items-center justify-between text-muted-foreground">
+                  <span>Temp & Volt:</span>
+                  <span>{{ opt.temperature }}°C / {{ opt.voltage }}V</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Desktop Optical Table -->
+            <div class="hidden md:block overflow-x-auto">
+              <table class="w-full text-left border-collapse text-sm">
+                <thead>
+                  <tr class="border-b bg-muted/40 text-xs font-semibold text-muted-foreground uppercase tracking-wider">
+                    <th class="py-3 px-4">Port</th>
+                    <th class="py-3 px-4">Port Description</th>
+                    <th class="py-3 px-4">Brand</th>
+                    <th class="py-3 px-4">Specs & Part Number</th>
+                    <th class="py-3 px-4">Rx / Tx Power (dBm)</th>
+                    <th class="py-3 px-4">Temp & Voltage</th>
+                    <th class="py-3 px-4">Health</th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y font-mono text-xs">
+                  <tr v-for="opt in opticalTransceivers" :key="opt.port" class="hover:bg-muted/30">
+                    <td class="py-3 px-4 font-bold">{{ opt.portShort || opt.port }}</td>
+
+                    <td class="py-3 px-4 font-sans text-xs text-muted-foreground truncate max-w-[200px]">
+                      <span :title="getPortDescription(opt.port, opt.portShort)" class="font-medium text-foreground">
+                        {{ getPortDescription(opt.port, opt.portShort) }}
                       </span>
-                    </div>
-                    <span v-else-if="opt.status === 'absent'" class="text-zinc-500 italic">No module</span>
-                    <span v-else class="text-muted-foreground">—</span>
-                  </td>
+                    </td>
 
-                  <td class="py-3 px-4">
-                    <div v-if="opt.status === 'no_ddm'" class="text-xs text-muted-foreground italic font-sans flex items-center gap-1.5">
-                      <Icon icon="carbon:warning-alt" class="w-3.5 h-3.5 text-slate-400" />
-                      DDM not supported
-                    </div>
-                    <div v-else-if="opt.status === 'absent'" class="text-xs text-muted-foreground italic font-sans">
-                      —
-                    </div>
-                    <div v-else class="flex items-center gap-1.5 font-mono text-xs whitespace-nowrap">
-                      <span class="text-muted-foreground text-[10px]">Rx:</span>
-                      <span :class="getRxColor(opt.rxPower)">
-                        {{ opt.rxPower !== null ? `${opt.rxPower} dBm` : 'No Signal' }}
+                    <td class="py-3 px-4 font-sans">
+                      <span v-if="opt.vendor" class="px-2 py-0.5 rounded bg-muted font-semibold text-xs text-foreground">
+                        {{ opt.vendor }}
                       </span>
-                      <span class="text-muted-foreground/60 font-sans">/</span>
-                      <span class="text-muted-foreground text-[10px]">Tx:</span>
-                      <span :class="getTxColor(opt.txPower)">
-                        {{ opt.txPower !== null ? `${opt.txPower} dBm` : 'N/A' }}
+                      <span v-else-if="opt.status === 'absent'" class="text-zinc-500 italic">Absent</span>
+                      <span v-else class="text-muted-foreground">—</span>
+                    </td>
+
+                    <td class="py-3 px-4 font-sans text-xs">
+                      <div v-if="opt.partNumber || opt.transceiverType" class="flex flex-col">
+                        <span class="font-medium text-foreground">{{ opt.partNumber || opt.transceiverType }}</span>
+                        <span class="text-[11px] text-muted-foreground font-mono" v-if="opt.transceiverType && opt.partNumber">
+                          {{ opt.transceiverType }}{{ opt.wavelength ? ' (' + opt.wavelength + 'nm)' : '' }}
+                        </span>
+                      </div>
+                      <span v-else-if="opt.status === 'absent'" class="text-zinc-500 italic">No module</span>
+                      <span v-else class="text-muted-foreground">—</span>
+                    </td>
+
+                    <td class="py-3 px-4">
+                      <div v-if="opt.status === 'no_ddm'" class="text-xs text-muted-foreground italic font-sans flex items-center gap-1.5">
+                        <Icon icon="carbon:warning-alt" class="w-3.5 h-3.5 text-slate-400" />
+                        DDM not supported
+                      </div>
+                      <div v-else-if="opt.status === 'absent'" class="text-xs text-muted-foreground italic font-sans">
+                        —
+                      </div>
+                      <div v-else class="flex items-center gap-1.5 font-mono text-xs whitespace-nowrap">
+                        <span class="text-muted-foreground text-[10px]">Rx:</span>
+                        <span :class="getRxColor(opt.rxPower)">
+                          {{ opt.rxPower !== null ? `${opt.rxPower} dBm` : 'No Signal' }}
+                        </span>
+                        <span class="text-muted-foreground/60 font-sans">/</span>
+                        <span class="text-muted-foreground text-[10px]">Tx:</span>
+                        <span :class="getTxColor(opt.txPower)">
+                          {{ opt.txPower !== null ? `${opt.txPower} dBm` : 'N/A' }}
+                        </span>
+                      </div>
+                    </td>
+
+                    <td class="py-3 px-4 text-xs font-mono whitespace-nowrap">
+                      <span v-if="opt.temperature !== null || opt.voltage !== null">
+                        {{ opt.temperature !== null ? `${opt.temperature}°C` : '—' }}
+                        <span class="text-muted-foreground/60 mx-1">/</span>
+                        {{ opt.voltage !== null ? `${opt.voltage}V` : '—' }}
                       </span>
-                    </div>
-                  </td>
+                      <span v-else class="text-muted-foreground">—</span>
+                    </td>
 
-                  <td class="py-3 px-4 text-xs font-mono whitespace-nowrap">
-                    <span v-if="opt.temperature !== null || opt.voltage !== null">
-                      {{ opt.temperature !== null ? `${opt.temperature}°C` : '—' }}
-                      <span class="text-muted-foreground/60 mx-1">/</span>
-                      {{ opt.voltage !== null ? `${opt.voltage}V` : '—' }}
-                    </span>
-                    <span v-else class="text-muted-foreground">—</span>
-                  </td>
-
-                  <td class="py-3 px-4">
-                    <span
-                      class="px-2 py-0.5 rounded text-xs uppercase font-sans font-semibold whitespace-nowrap"
-                      :class="{
-                        'bg-emerald-500/10 text-emerald-600': opt.status === 'normal',
-                        'bg-amber-500/10 text-amber-600': opt.status === 'warning',
-                        'bg-rose-500/10 text-rose-600': opt.status === 'critical',
-                        'bg-slate-500/10 text-slate-500 dark:text-slate-400 border border-slate-500/20': opt.status === 'no_ddm',
-                        'bg-zinc-500/10 text-zinc-400': opt.status === 'absent' || opt.status === 'no_signal'
-                      }"
-                    >
-                      {{ opt.status === 'no_ddm' ? 'No DDM' : opt.status === 'no_signal' ? 'No Link' : opt.status === 'absent' ? 'Absent' : opt.status }}
-                    </span>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
+                    <td class="py-3 px-4">
+                      <span
+                        class="px-2 py-0.5 rounded text-xs uppercase font-sans font-semibold whitespace-nowrap"
+                        :class="{
+                          'bg-emerald-500/10 text-emerald-600': opt.status === 'normal',
+                          'bg-amber-500/10 text-amber-600': opt.status === 'warning',
+                          'bg-rose-500/10 text-rose-600': opt.status === 'critical',
+                          'bg-slate-500/10 text-slate-500 dark:text-slate-400 border border-slate-500/20': opt.status === 'no_ddm',
+                          'bg-zinc-500/10 text-zinc-400': opt.status === 'absent' || opt.status === 'no_signal'
+                        }"
+                      >
+                        {{ opt.status === 'no_ddm' ? 'No DDM' : opt.status === 'no_signal' ? 'No Link' : opt.status === 'absent' ? 'Absent' : opt.status }}
+                      </span>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
           </div>
         </div>
       </div>
@@ -1170,39 +1505,79 @@ onMounted(() => {
             No LLDP neighbors discovered. Ensure LLDP is enabled on connected devices.
           </div>
 
-          <div v-else class="overflow-x-auto">
-            <table class="w-full text-left border-collapse text-sm">
-              <thead>
-                <tr class="border-b bg-muted/40 text-xs font-semibold text-muted-foreground uppercase tracking-wider">
-                  <th class="py-3 px-4">Local Port</th>
-                  <th class="py-3 px-4">Remote System Name</th>
-                  <th class="py-3 px-4">Remote Port</th>
-                  <th class="py-3 px-4">Capabilities</th>
-                  <th class="py-3 px-4">Classification</th>
-                </tr>
-              </thead>
-              <tbody class="divide-y text-xs">
-                <tr v-for="item in sw.lldp" :key="item.localPort" class="hover:bg-muted/30">
-                  <td class="py-3 px-4 font-mono font-bold">{{ item.localPortShort || item.localPort }}</td>
-                  <td class="py-3 px-4 font-semibold text-foreground flex items-center gap-1.5">
-                    <Icon :icon="item.isUplink ? 'carbon:network-enterprise' : 'carbon:wifi'" class="w-4 h-4 text-muted-foreground" />
-                    {{ item.remoteDevice }}
-                  </td>
-                  <td class="py-3 px-4 font-mono text-muted-foreground">{{ item.remotePort }}</td>
-                  <td class="py-3 px-4">{{ item.capability || 'Bridge' }}</td>
-                  <td class="py-3 px-4">
-                    <span
-                      v-if="item.isUplink"
-                      class="inline-flex items-center gap-1 text-xs font-bold text-blue-600 bg-blue-500/10 px-2.5 py-0.5 rounded-full"
-                    >
-                      <Icon icon="ph:arrow-fat-up-fill" class="w-3.5 h-3.5" />
-                      Inter-Switch Uplink
-                    </span>
-                    <span v-else class="text-muted-foreground font-medium">Access Device</span>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
+          <div v-else>
+            <!-- Mobile LLDP Cards -->
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 p-3 md:hidden">
+              <div
+                v-for="item in sw.lldp"
+                :key="item.localPort"
+                class="bg-muted/30 border rounded-xl p-3 flex flex-col justify-between gap-2"
+              >
+                <div class="flex items-center justify-between">
+                  <span class="font-mono font-bold text-sm text-foreground">{{ item.localPortShort || item.localPort }}</span>
+                  <span
+                    v-if="item.isUplink"
+                    class="inline-flex items-center gap-1 text-[10px] font-bold text-blue-600 bg-blue-500/10 px-2 py-0.5 rounded-full"
+                  >
+                    <Icon icon="ph:arrow-fat-up-fill" class="w-3 h-3" />
+                    Uplink
+                  </span>
+                  <span v-else class="text-[10px] text-muted-foreground font-medium bg-muted px-2 py-0.5 rounded-full">
+                    Access Device
+                  </span>
+                </div>
+
+                <div class="flex items-center gap-2">
+                  <Icon :icon="item.isUplink ? 'carbon:network-enterprise' : 'carbon:wifi'" class="w-4 h-4 text-primary shrink-0" />
+                  <span class="font-bold text-xs text-foreground truncate">{{ item.remoteDevice }}</span>
+                </div>
+
+                <div class="text-[11px] font-mono text-muted-foreground flex items-center justify-between pt-1 border-t">
+                  <span>Remote Port:</span>
+                  <span class="text-foreground font-semibold">{{ item.remotePort }}</span>
+                </div>
+                <div class="text-[11px] text-muted-foreground flex items-center justify-between">
+                  <span>Capability:</span>
+                  <span>{{ item.capability || 'Bridge' }}</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Desktop LLDP Table -->
+            <div class="hidden md:block overflow-x-auto">
+              <table class="w-full text-left border-collapse text-sm">
+                <thead>
+                  <tr class="border-b bg-muted/40 text-xs font-semibold text-muted-foreground uppercase tracking-wider">
+                    <th class="py-3 px-4">Local Port</th>
+                    <th class="py-3 px-4">Remote System Name</th>
+                    <th class="py-3 px-4">Remote Port</th>
+                    <th class="py-3 px-4">Capabilities</th>
+                    <th class="py-3 px-4">Classification</th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y text-xs">
+                  <tr v-for="item in sw.lldp" :key="item.localPort" class="hover:bg-muted/30">
+                    <td class="py-3 px-4 font-mono font-bold">{{ item.localPortShort || item.localPort }}</td>
+                    <td class="py-3 px-4 font-semibold text-foreground flex items-center gap-1.5">
+                      <Icon :icon="item.isUplink ? 'carbon:network-enterprise' : 'carbon:wifi'" class="w-4 h-4 text-muted-foreground" />
+                      {{ item.remoteDevice }}
+                    </td>
+                    <td class="py-3 px-4 font-mono text-muted-foreground">{{ item.remotePort }}</td>
+                    <td class="py-3 px-4">{{ item.capability || 'Bridge' }}</td>
+                    <td class="py-3 px-4">
+                      <span
+                        v-if="item.isUplink"
+                        class="inline-flex items-center gap-1 text-xs font-bold text-blue-600 bg-blue-500/10 px-2.5 py-0.5 rounded-full"
+                      >
+                        <Icon icon="ph:arrow-fat-up-fill" class="w-3.5 h-3.5" />
+                        Inter-Switch Uplink
+                      </span>
+                      <span v-else class="text-muted-foreground font-medium">Access Device</span>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
           </div>
         </div>
       </div>
@@ -1286,9 +1661,21 @@ onMounted(() => {
         </div>
 
         <div class="border rounded-xl bg-card overflow-hidden shadow-xs">
-          <div class="p-4 border-b bg-muted/20 flex items-center justify-between">
-            <h3 class="font-semibold text-sm">Current Running Configuration</h3>
-            <span class="text-xs text-muted-foreground">Read-only live copy</span>
+          <div class="p-3.5 sm:p-4 border-b bg-muted/20 flex items-center justify-between gap-2 flex-wrap">
+            <div>
+              <h3 class="font-semibold text-sm">Current Running Configuration</h3>
+              <p class="text-xs text-muted-foreground">Read-only live copy from switch</p>
+            </div>
+            <div class="flex items-center gap-2">
+              <Button size="sm" variant="outline" class="h-8 text-xs" @click="copyRunningConfig" :disabled="!sw.raw_config">
+                <Icon :icon="copiedConfig ? 'lucide:check' : 'lucide:copy'" class="w-3.5 h-3.5 mr-1" :class="copiedConfig ? 'text-emerald-500' : ''" />
+                {{ copiedConfig ? 'Copied!' : 'Copy Config' }}
+              </Button>
+              <Button size="sm" variant="outline" class="h-8 text-xs" @click="downloadRunningConfig" :disabled="!sw.raw_config">
+                <Icon icon="lucide:download" class="w-3.5 h-3.5 mr-1" />
+                Download .cfg
+              </Button>
+            </div>
           </div>
           <div class="p-4 bg-zinc-950 text-zinc-300 font-mono text-xs overflow-x-auto max-h-[600px] leading-relaxed">
             <pre>{{ sw.raw_config || 'No running config synced yet. Click "Sync Switch" to retrieve it via SSH.' }}</pre>

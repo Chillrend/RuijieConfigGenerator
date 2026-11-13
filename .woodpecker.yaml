@@ -1,0 +1,17 @@
+when:
+  - branch: main
+    event: [push, manual]
+
+steps:
+  build-and-push:
+    image: woodpeckerci/plugin-kaniko
+    settings:
+      registry: images.pnj.ac.id
+      repo: pnjacid/ruijie-config-generator
+      username:
+        from_secret: REGISTRY_USERNAME
+      password:
+        from_secret: REGISTRY_PASSWORD
+      tags:
+        - latest
+        - ${CI_COMMIT_SHA:0:8}

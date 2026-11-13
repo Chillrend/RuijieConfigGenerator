@@ -128,6 +128,7 @@ router.get('/', async (req, res) => {
           model_id: sw.model_id,
           mgmt_ip: sw.mgmt_ip,
           inventory_tag: sw.inventory_tag,
+          group_name: sw.group_name || '',
           status: isLiveGrpc ? 'online' : (sw.status || 'unknown'),
           telemetry_mode: isLiveGrpc ? 'grpc' : (sw.telemetry_mode || 'ssh'),
           is_live_grpc: isLiveGrpc,
@@ -155,9 +156,96 @@ router.get('/', async (req, res) => {
   }
 });
 
+// List all switch groups with counts
+router.get('/groups', async (req, res) => {
+  try {
+    const db = getDB();
+    const groups = await db.all('SELECT * FROM switch_groups ORDER BY name ASC');
+    const switchCounts = await db.all(
+      "SELECT group_name, COUNT(*) as count FROM switches WHERE group_name IS NOT NULL AND group_name != '' GROUP BY group_name"
+    );
+    const countMap = {};
+    for (const row of switchCounts) {
+      countMap[row.group_name] = row.count;
+    }
+    const result = groups.map(g => ({
+      ...g,
+      count: countMap[g.name] || 0
+    }));
+    res.json({ groups: result });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Create new switch group
+router.post('/groups', async (req, res) => {
+  const { name, description } = req.body;
+  const cleanName = (name || '').trim();
+  if (!cleanName) {
+    return res.status(400).json({ error: 'Group name is required' });
+  }
+  try {
+    const db = getDB();
+    const existing = await db.get('SELECT id FROM switch_groups WHERE LOWER(name) = LOWER(?)', [cleanName]);
+    if (existing) {
+      return res.status(409).json({ error: `Group '${cleanName}' already exists` });
+    }
+    const result = await db.run(
+      'INSERT INTO switch_groups (name, description) VALUES (?, ?)',
+      [cleanName, (description || '').trim()]
+    );
+    res.status(201).json({
+      success: true,
+      group: {
+        id: result.lastID,
+        name: cleanName,
+        description: (description || '').trim(),
+        count: 0
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Delete switch group
+router.delete('/groups/:id', async (req, res) => {
+  try {
+    const db = getDB();
+    const group = await db.get('SELECT * FROM switch_groups WHERE id = ? OR name = ?', [req.params.id, req.params.id]);
+    if (!group) {
+      return res.status(404).json({ error: 'Group not found' });
+    }
+    await db.run('DELETE FROM switch_groups WHERE id = ?', [group.id]);
+    await db.run('UPDATE switches SET group_name = NULL WHERE group_name = ?', [group.name]);
+    res.json({ success: true, message: `Group '${group.name}' removed and unassigned from switches` });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Batch assign switches to a group
+router.post('/groups/assign', async (req, res) => {
+  const { switchIds, group_name } = req.body;
+  if (!Array.isArray(switchIds) || switchIds.length === 0) {
+    return res.status(400).json({ error: 'switchIds array is required' });
+  }
+  const cleanGroup = group_name ? group_name.trim() : null;
+  try {
+    const db = getDB();
+    for (const id of switchIds) {
+      await db.run('UPDATE switches SET group_name = ? WHERE id = ?', [cleanGroup, id]);
+    }
+    res.json({ success: true, count: switchIds.length });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Add switch directly to fleet (bypassing provisioner)
 router.post('/', async (req, res) => {
-  const { mgmt_ip, hostname, admin_username, admin_password, enable_password, inventory_tag, model_id } = req.body;
+  const { mgmt_ip, hostname, admin_username, admin_password, enable_password, inventory_tag, model_id, group_name } = req.body;
   if (!mgmt_ip || !mgmt_ip.trim()) {
     return res.status(400).json({ error: 'Management IP is required' });
   }
@@ -169,6 +257,7 @@ router.post('/', async (req, res) => {
   const enablePass = enable_password || pass;
   const tag = (inventory_tag || '').trim();
   const model = (model_id || '').trim();
+  const group = (group_name || '').trim();
 
   try {
     const db = getDB();
@@ -178,9 +267,9 @@ router.post('/', async (req, res) => {
     }
 
     const insertResult = await db.run(
-      `INSERT INTO switches (hostname, mgmt_ip, admin_username, admin_password, enable_password, inventory_tag, model_id, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'unknown')`,
-      [cleanHost, cleanIp, user, pass, enablePass, tag, model]
+      `INSERT INTO switches (hostname, mgmt_ip, admin_username, admin_password, enable_password, inventory_tag, model_id, status, group_name)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'unknown', ?)`,
+      [cleanHost, cleanIp, user, pass, enablePass, tag, model, group || null]
     );
 
     const newId = insertResult.lastID;
@@ -594,7 +683,8 @@ router.put('/:id', async (req, res) => {
     inventory_tag,
     model_id,
     serial_number,
-    mac_address
+    mac_address,
+    group_name
   } = req.body;
 
   try {
@@ -622,6 +712,7 @@ router.put('/:id', async (req, res) => {
     const newModel = model_id !== undefined ? (model_id || '').trim() : sw.model_id;
     const newSn = serial_number !== undefined ? (serial_number || '').trim() : sw.serial_number;
     const newMac = mac_address !== undefined ? (mac_address || '').trim() : sw.mac_address;
+    const newGroup = group_name !== undefined ? (group_name || '').trim() : (sw.group_name || '');
 
     await db.run(
       `UPDATE switches SET
@@ -634,9 +725,10 @@ router.put('/:id', async (req, res) => {
         model_id = ?,
         serial_number = ?,
         mac_address = ?,
+        group_name = ?,
         updated_at = CURRENT_TIMESTAMP
        WHERE id = ?`,
-      [newHostname, newIp, newAdminUser, newAdminPass, newEnablePass, newTag, newModel, newSn, newMac, req.params.id]
+      [newHostname, newIp, newAdminUser, newAdminPass, newEnablePass, newTag, newModel, newSn, newMac, newGroup || null, req.params.id]
     );
 
     res.json({
@@ -650,7 +742,8 @@ router.put('/:id', async (req, res) => {
         inventory_tag: newTag,
         model_id: newModel,
         serial_number: newSn,
-        mac_address: newMac
+        mac_address: newMac,
+        group_name: newGroup
       }
     });
   } catch (err) {
